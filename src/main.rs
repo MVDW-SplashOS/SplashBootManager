@@ -13,6 +13,7 @@ mod boot;
 
 use gtk::glib;
 use gtk::prelude::*;
+use adw::prelude::*;
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -23,7 +24,6 @@ const APP_ID: &str = "com.splashos.BootManager";
 
 /// Everything the UI needs, shared across callbacks.
 struct Manager {
-    boot_dir: PathBuf,
     dry_run: bool,
     entries: Vec<bls::BootEntry>,
     default: Option<bls::BootEntry>,
@@ -58,7 +58,6 @@ fn main() -> glib::ExitCode {
     let default = bls::default_entry(&entries, &default_id).cloned();
 
     let manager = Rc::new(RefCell::new(Manager {
-        boot_dir,
         dry_run,
         entries,
         default,
@@ -67,19 +66,21 @@ fn main() -> glib::ExitCode {
 
     let app = adw::Application::builder()
         .application_id(APP_ID)
-        .flags(gtk::ApplicationFlags::NON_UNIQUE)
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     let manager_for_activate = manager.clone();
     app.connect_activate(move |app| build_ui(app, manager_for_activate.clone()));
 
-    app.run()
+    // We parse our own args above; pass only argv[0] to GApplication so its
+    // built-in option parser doesn't reject --dry-run / --boot-dir.
+    app.run_with_args(&["splash-boot-manager"])
 }
 
 fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>) {
-    let (dry_run, timeout_secs, has_default) = {
+    let (timeout_secs, has_default) = {
         let m = manager.borrow();
-        (m.dry_run, m.timeout_secs, m.default.is_some())
+        (m.timeout_secs, m.default.is_some())
     };
 
     let window = adw::ApplicationWindow::builder()
@@ -134,11 +135,11 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>) {
         let list = list.clone();
         let status = status.clone();
         controller.connect_key_pressed(move |_ctrl, keyval, _keycode, state| {
-            let is_super = keyval == gtk::gdk::keys::constants::Super_L
-                || keyval == gtk::gdk::keys::constants::Super_R
+            let is_super = keyval == gtk::gdk::Key::Super_L
+                || keyval == gtk::gdk::Key::Super_R
                 || state.contains(gtk::gdk::ModifierType::SUPER_MASK);
             if !is_super {
-                return glib::propagation::Propagation::Proceed;
+                return glib::signal::Propagation::Proceed;
             }
             if !menu_opened.get() {
                 menu_opened.set(true);
@@ -146,7 +147,7 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>) {
                 list.set_visible(true);
                 status.set_text("Boot options — hold Super");
             }
-            glib::propagation::Propagation::Stop
+            glib::signal::Propagation::Stop
         });
     }
     window.add_controller(controller);
