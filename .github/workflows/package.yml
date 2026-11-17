@@ -1,0 +1,90 @@
+# Packages splash_boot_manager for the SplashBuilder bootloader edition:
+#
+#   1. verification build (GTK4/libadwaita from the runner, crates vendored
+#      here so the offline build inside the package is proven to work)
+#   2. assembles the SOURCE package tarball (sources + vendored crates, the
+#      same layout every other package has: <pkg>-<ver>/ top-level dir)
+#   3. publishes it as a pre-release asset, so SourceStream can fetch it via
+#      the upstream-sources.yml release URL and repack it with the
+#      BuildScripts manifest/build script like any other package
+#
+# Run manually, or push a v* tag (the tag is derived from Cargo.toml either
+# way). Bumping Cargo.toml's version + re-running produces a new release.
+name: package splash_boot_manager
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the boot manager sources
+        uses: actions/checkout@v4
+
+      - name: Checkout BuildScripts (manifest + build script)
+        uses: actions/checkout@v4
+        with:
+          repository: MVDW-SplashOS/BuildScripts
+          ref: main
+          path: buildscripts
+          persist-credentials: false
+
+      - name: Read the package version from Cargo.toml
+        id: version
+        run: |
+          ver="$(sed -n 's/^version *= *"\(.*\)".*$/\1/p' Cargo.toml | head -n1)"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "package version: $ver"
+
+      - name: Install the GTK4/libadwaita dev libraries (verification build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev
+
+      - name: Set up the rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Vendor the crate dependencies
+        run: |
+          cargo vendor vendor > /dev/null
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [source.crates-io]
+          replace-with = "vendored-sources"
+
+          [source.vendored-sources]
+          directory = "vendor"
+          EOF
+
+      - name: Verification build (offline, vendored)
+        run: cargo build --release --offline
+
+      - name: Assemble the source package tarball
+        id: package
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          pkg="splash_boot_manager-$ver"
+          mkdir -p stage/build "stage/$pkg"
+          cp Cargo.toml Cargo.lock "stage/$pkg/"
+          cp -r src .cargo vendor "stage/$pkg/"
+          cp "buildscripts/splash_boot_manager/$ver/manifest.yml" stage/
+          cp "buildscripts/splash_boot_manager/$ver/build/"*.sh stage/build/
+          tar --owner=0 --group=0 --numeric-owner \
+              -cJf "$pkg.tar.xz" -C stage "$pkg" manifest.yml build
+          echo "tarball=$pkg.tar.xz" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.version.outputs.version }}"
+          name: "splash_boot_manager ${{ steps.version.outputs.version }}"
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: ${{ steps.package.outputs.tarball }}
