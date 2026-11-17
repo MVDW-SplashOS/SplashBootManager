@@ -25,21 +25,29 @@ const APP_ID: &str = "com.splashos.BootManager";
 /// Everything the UI needs, shared across callbacks.
 struct Manager {
     dry_run: bool,
+    menu_mode: bool,
     entries: Vec<bls::BootEntry>,
     default: Option<bls::BootEntry>,
     timeout_secs: u32,
 }
 
 fn main() -> glib::ExitCode {
-    // Minimal arg handling: --dry-run and --boot-dir <path>. Kept
+    // Minimal arg handling: --dry-run, --menu and --boot-dir <path>. Kept
     // dependency-free on purpose (no clap) to keep the vendored crate tree
     // small for offline from-source builds.
     let mut dry_run = false;
+    let mut menu_mode = false;
     let mut boot_dir = PathBuf::from("/boot");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
+            // Menu mode: skip the countdown entirely and present the boot
+            // options list right away. Used when the boot manager is
+            // launched because the Super key was held at power-on (see the
+            // /sbin/init boot flow) - in that case the default entry is
+            // NOT booted automatically, the user picks from the UI.
+            "--menu" => menu_mode = true,
             "--boot-dir" => {
                 if let Some(dir) = args.next() {
                     boot_dir = PathBuf::from(dir);
@@ -47,7 +55,7 @@ fn main() -> glib::ExitCode {
             }
             other => {
                 eprintln!("splash-boot-manager: unknown argument '{other}'");
-                eprintln!("usage: splash-boot-manager [--dry-run] [--boot-dir <path>]");
+                eprintln!("usage: splash-boot-manager [--dry-run] [--menu] [--boot-dir <path>]");
                 return glib::ExitCode::FAILURE;
             }
         }
@@ -59,6 +67,7 @@ fn main() -> glib::ExitCode {
 
     let manager = Rc::new(RefCell::new(Manager {
         dry_run,
+        menu_mode,
         entries,
         default,
         timeout_secs,
@@ -127,6 +136,14 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>) {
 
     // ---- menu mode: opened by holding Super during the countdown -----------
     let menu_opened = Rc::new(Cell::new(false));
+    // The manager is launched with --menu when the Super key was already
+    // held at power-on: present the boot options list immediately.
+    if manager.borrow().menu_mode {
+        menu_opened.set(true);
+        list.set_visible(true);
+        countdown.set_visible(false);
+        status.set_text("Boot options");
+    }
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {

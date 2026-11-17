@@ -50,3 +50,21 @@ cargo run -- --dry-run --boot-dir ./example-boot
 
 `example-boot/` provides a sample `$BOOT` tree with BLS entries for
 development without a boot environment.
+
+## Testing a built boot-manager partition
+
+`install-test-entries.sh` (dev helper, machine-specific) prepares a partition
+built by SplashBuilder's `bootloader` edition for a boot test:
+
+```sh
+sudo ./install-test-entries.sh [boot-dir] [splashos-root] [--skip-grub]
+# defaults: /mnt/bootmanager /mnt/splashos
+```
+
+It snapshots this machine's Debian + SplashOS kernels into the boot tree,
+writes the BLS `loader/` tree for them, and appends a
+"Splash Boot Manager (dev)" entry to the host GRUB (`/etc/grub.d/40_custom` +
+`update-grub`, idempotent). Re-run it after every rebuild — the builder wipes
+the partition. Until the graphical manager is packaged, the target's
+placeholder `/sbin/init` (edition config in the `configuration` repo) kexecs
+the default BLS entry after the loader.conf timeout.
