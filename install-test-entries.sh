@@ -70,10 +70,13 @@ edition_file="$SCRIPT_DIR/../configuration/edition-packages/${edition_release:-0
 
 install_boot_tools() {
 	local cmd
-	cmd=$(yq eval '.build[0].build[-1].commands[0]' "$edition_file")
+	# The superkey compile task is the custom task inside the (first)
+	# chroot section; the dev init is the only top-level custom task.
+	# select() over positional indices: task order can shift.
+	cmd=$(yq eval '.build[0].build[] | select(.task == "custom") | .commands[0]' "$edition_file")
 	echo "Installing boot tools from $edition_file (superkey probe)..."
 	splash_partition_root="$boot_dir" eval "$cmd"
-	cmd=$(yq eval '.build[-1].commands[0]' "$edition_file")
+	cmd=$(yq eval '.build[] | select(.task == "custom") | .commands[0]' "$edition_file")
 	echo "Installing the dev init from the edition config..."
 	splash_partition_root="$boot_dir" eval "$cmd"
 }

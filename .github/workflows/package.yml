@@ -73,7 +73,7 @@ jobs:
           pkg="splash_boot_manager-$ver"
           mkdir -p stage/build "stage/$pkg"
           cp Cargo.toml Cargo.lock "stage/$pkg/"
-          cp -r src .cargo vendor "stage/$pkg/"
+          cp -r src .cargo vendor assets splash-logo.c "stage/$pkg/"
           cp "buildscripts/splash_boot_manager/$ver/manifest.yml" stage/
           cp "buildscripts/splash_boot_manager/$ver/build/"*.sh stage/build/
           tar --owner=0 --group=0 --numeric-owner \

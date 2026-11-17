@@ -108,6 +108,27 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>) {
         .margin_end(24)
         .build();
 
+    // Animated boot logo (ships with the manager; the GIF is the source of
+    // truth for the animation - the same animation the fbdev stage shows
+    // statically and plymouth replays during distro boot).
+    let logo_path = PathBuf::from("/usr/share/splashos/boot-logo.gif");
+    if logo_path.exists() {
+        if let Ok(animation) = gtk::gdk_pixbuf::PixbufAnimation::from_file(&logo_path) {
+            let picture = gtk::Picture::new();
+            let iter = std::rc::Rc::new(RefCell::new(
+                animation.iter(Some(std::time::SystemTime::now())),
+            ));
+            picture.set_pixbuf(Some(&iter.borrow().pixbuf()));
+            content.append(&picture);
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                let iter = iter.borrow_mut();
+                iter.advance(std::time::SystemTime::now());
+                picture.set_pixbuf(Some(&iter.pixbuf()));
+                glib::ControlFlow::Continue
+            });
+        }
+    }
+
     let status = gtk::Label::new(Some("Splash Boot Manager"));
     status.add_css_class("title-2");
     content.append(&status);
