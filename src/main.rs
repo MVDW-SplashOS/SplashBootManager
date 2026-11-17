@@ -109,8 +109,9 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
         .application(app)
         .title("Splash Boot Manager")
         .build();
-    window.fullscreen();
-
+    // Do NOT call window.fullscreen(): cage's kiosk fullscreens the
+    // surface itself - the client-initiated request races cage's configure
+    // and GDK ends up with a garbage surface size (wl_shm pool abort).
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(500);

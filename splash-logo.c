@@ -5,8 +5,9 @@
  * hides the text console so nothing repaints over it, and blits the frames
  * centered on the screen, scaled down to a fraction of the screen height
  * (Apple-boot-logo style; default 25%, override with LOGO_PERCENT).
- * Static assets have nframes == 1: one blit, the screen keeps the frame
- * until kexec replaces it.
+ * The animation plays ONCE and the LAST frame stays on the screen - the
+ * process exits and nothing repaints until the UI or kexec takes over.
+ * SPLASH_ONCE blits only the first frame (kexec blit path).
  *
  * The kernel framebuffer is expected to be 32bpp x8r8g8b8 (virtio-gpu
  * default). FB0 overrides the framebuffer device (testing); LOGO overrides
@@ -99,9 +100,13 @@ int main(int argc, char **argv)
 	if (fb == MAP_FAILED) { close(fd); return 1; }
 	memset(fb, 0, screen);		/* black background */
 
+	/* Apple-style: play the animation ONCE and hold the LAST frame.
+	 * The loop exits after the final frame and the framebuffer keeps it
+	 * until something else repaints (the UI or kexec). SPLASH_ONCE
+	 * blits only the first frame (kexec blit path) and exits. */
 	int once = getenv("SPLASH_ONCE") != NULL;
 
-	for (unsigned f = 0; ; f = (f + 1) % nframes) {
+	for (unsigned f = 0; f < nframes; f++) {
 		const unsigned char *src = frames + (size_t)f * fsize;
 		for (unsigned y = 0; y < th; y++) {
 			unsigned char *dst = fb + (size_t)(yoff + y) * scanline
@@ -113,7 +118,7 @@ int main(int argc, char **argv)
 				       srcline + (size_t)((unsigned long long)x * w / tw) * 4,
 				       4);
 		}
-		if (once || nframes == 1)
+		if (once || f + 1 == nframes)
 			break;
 		if (delay_ms)
 			usleep(delay_ms * 1000u);
