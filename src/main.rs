@@ -108,6 +108,12 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Splash Boot Manager")
+        // A concrete initial size: without it GTK 4.16 computes garbage
+        // geometry for the first frame under cage's kiosk ("Unable to
+        // create Cairo image surface: invalid value (typically too big)")
+        // and the picker never renders. Cage fullscreens the toplevel.
+        .default_width(640)
+        .default_height(480)
         .build();
     // Do NOT call window.fullscreen(): cage's kiosk fullscreens the
     // surface itself - the client-initiated request races cage's configure
