@@ -194,20 +194,27 @@ fi
 
 grub_custom=/etc/grub.d/40_custom
 if grep -q "Splash Boot Manager (dev)" "$grub_custom" 2>/dev/null; then
-	echo "GRUB entry already present in $grub_custom, skipping."
-else
-	cat >> "$grub_custom" << EOF
+	echo "Replacing the existing Splash Boot Manager entry in $grub_custom..."
+	# delete the previous block (from the menuentry line to its closing })
+	sed -i '/^menuentry "Splash Boot Manager (dev)" {$/,/^}$/d' "$grub_custom"
+fi
+
+cat >> "$grub_custom" << EOF
 
 menuentry "Splash Boot Manager (dev)" {
 	insmod ext2
 	search --no-floppy --fs-uuid --set=root $bm_uuid
 	# PARTUUID, not filesystem UUID: the target kernel boots without an
 	# initramfs, so only the kernel itself can resolve the root device.
-	linux /boot/$bm_vmlinuz root=PARTUUID=$bm_partuuid ro init=/sbin/init
+	# quiet: the boot-manager phase must not print kernel hotplug noise
+	# over the splash logo (async USB/NVMe probing runs for seconds
+	# after init starts and fbcon cannot be unbound from the active
+	# console). vt.global_cursor_default=0 stops the fbcon cursor
+	# blinking over the logo.
+	linux /boot/$bm_vmlinuz root=PARTUUID=$bm_partuuid ro init=/sbin/init quiet vt.global_cursor_default=0
 }
 EOF
 	echo "GRUB entry appended to $grub_custom"
-fi
 
 update-grub
 echo "Done. Reboot and pick 'Splash Boot Manager (dev)'."
