@@ -73,13 +73,16 @@ jobs:
         run: |
           ver="${{ steps.version.outputs.version }}"
           pkg="splash_boot_manager-$ver"
-          mkdir -p stage/build "stage/$pkg"
+          # SourceStream's repacker requires exactly ONE top-level dir in the
+          # archive (the <pkg>-<ver> source tree); manifest.yml + build/ +
+          # patch/ go INSIDE it, same layout every other package has.
+          mkdir -p "stage/$pkg/build"
           cp Cargo.toml Cargo.lock "stage/$pkg/"
           cp -r src .cargo vendor assets splash-logo.c "stage/$pkg/"
-          cp "buildscripts/splash_boot_manager/$ver/manifest.yml" stage/
-          cp "buildscripts/splash_boot_manager/$ver/build/"*.sh stage/build/
+          cp "buildscripts/splash_boot_manager/$ver/manifest.yml" "stage/$pkg/"
+          cp "buildscripts/splash_boot_manager/$ver/build/"*.sh "stage/$pkg/build/"
           tar --owner=0 --group=0 --numeric-owner \
-              -cJf "$pkg.tar.xz" -C stage "$pkg" manifest.yml build
+              -cJf "$pkg.tar.xz" -C stage "$pkg"
           echo "tarball=$pkg.tar.xz" >> "$GITHUB_OUTPUT"
 
       - name: Publish the pre-release
