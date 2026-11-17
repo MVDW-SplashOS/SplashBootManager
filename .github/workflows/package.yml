@@ -101,7 +101,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # SourceStream uses Python 3.12+ f-string syntax (see the note in
+          # the BuildScripts deploy workflow); 3.11 fails at import.
+          python-version: "3.13"
 
       - name: Get SourceStream
         run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/MVDW-SplashOS/SourceStream.git
