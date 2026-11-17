@@ -40,6 +40,9 @@ fn read_lines(path: &Path) -> Vec<String> {
 }
 
 /// Parse `loader.conf` -> (default entry id, timeout in seconds).
+/// Unused while the dev flow launches only --splash/--menu (no countdown);
+/// kept for the packaged-manager phase.
+#[allow(dead_code)]
 pub fn parse_loader_conf(boot_dir: &Path) -> (Option<String>, u32) {
     let mut default = None;
     let mut timeout: u32 = 5;
@@ -111,7 +114,9 @@ pub fn scan_entries(boot_dir: &Path) -> Vec<BootEntry> {
 }
 
 /// Resolve which entry boots by default (loader.conf `default`, glob-style
-/// suffix match per BLS, otherwise the first entry).
+/// suffix match per BLS, otherwise the first entry). Unused without the
+/// countdown phase; kept for the packaged-manager phase.
+#[allow(dead_code)]
 pub fn default_entry<'a>(entries: &'a [BootEntry], default: &Option<String>) -> Option<&'a BootEntry> {
     let default_id = default.as_deref()?;
     entries
