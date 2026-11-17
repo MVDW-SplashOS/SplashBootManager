@@ -3,8 +3,10 @@
  * Reads a SPLASHLOGO1 raw asset (16-byte header: magic(12) + u32 LE width,
  * height, nframes, frame_delay_ms; then nframes frames of w*h*4 BGRA bytes),
  * hides the text console so nothing repaints over it, and blits the frames
- * centered on the screen. Static assets have nframes == 1: one blit, the
- * screen keeps the frame until kexec replaces it.
+ * centered on the screen, scaled down to a fraction of the screen height
+ * (Apple-boot-logo style; default 25%, override with LOGO_PERCENT).
+ * Static assets have nframes == 1: one blit, the screen keeps the frame
+ * until kexec replaces it.
  *
  * The kernel framebuffer is expected to be 32bpp x8r8g8b8 (virtio-gpu
  * default). FB0 overrides the framebuffer device (testing); LOGO overrides
@@ -23,12 +25,14 @@
 #define HDR_MAGIC	"SPLASHLOGO1"
 #define HDR_SIZE	28
 #define DEFAULT_LOGO	"/usr/share/splashos/boot-logo.raw"
-#define FB_BYTES(pp)	((pp) / 8)
+#define DEFAULT_PERCENT	25
 
 int main(int argc, char **argv)
 {
 	const char *fbdev = getenv("FB0") ? : "/dev/fb0";
 	const char *logo = getenv("LOGO") ? : DEFAULT_LOGO;
+	int percent = getenv("LOGO_PERCENT") ? atoi(getenv("LOGO_PERCENT"))
+					     : DEFAULT_PERCENT;
 	if (argc > 1) logo = argv[1];
 
 	FILE *lf = fopen(logo, "rb");
@@ -71,6 +75,19 @@ int main(int argc, char **argv)
 	size_t scanline = (size_t)vinfo.xres_virtual * 4;	/* 32bpp: 4 bytes/pixel */
 	size_t screen = scanline * vinfo.yres_virtual;
 
+	/* logo geometry: scaled to <percent> of the screen height (kept
+	 * within the screen bounds), centered. Nearest-neighbour sampling. */
+	if (percent <= 0 || percent > 100)
+		percent = DEFAULT_PERCENT;
+	unsigned th = (unsigned)vinfo.yres * (unsigned)percent / 100u;
+	unsigned tw = (unsigned)((unsigned long long)w * th / h);
+	if (!tw || !th || tw > (unsigned)vinfo.xres) {
+		tw = vinfo.xres;
+		th = (unsigned)((unsigned long long)h * tw / w);
+	}
+	unsigned xoff = (vinfo.xres > (int)tw) ? ((unsigned)vinfo.xres - tw) / 2u : 0;
+	unsigned yoff = (vinfo.yres > (int)th) ? ((unsigned)vinfo.yres - th) / 2u : 0;
+
 	/* hide the text console so fbcon does not repaint over the logo */
 	int vtc = open("/sys/class/vtconsole/vtcon1/bind", O_WRONLY);
 	if (vtc >= 0) {
@@ -82,18 +99,17 @@ int main(int argc, char **argv)
 	if (fb == MAP_FAILED) { close(fd); return 1; }
 	memset(fb, 0, screen);		/* black background */
 
-	size_t xoff = (vinfo.xres > w) ? (vinfo.xres - w) / 2 * 4 : 0;
-	size_t yoff = (vinfo.yres > h) ? (vinfo.yres - h) / 2 : 0;
-	size_t blit_w = (vinfo.xres < w) ? vinfo.xres : w;
-
 	for (unsigned f = 0; ; f = (f + 1) % nframes) {
-		unsigned char *src = frames + (size_t)f * fsize;
-		for (unsigned y = 0; y < h && yoff + y < vinfo.yres; y++) {
-			unsigned char *dst = fb + (yoff + y) * scanline + xoff;
-			size_t bytes = blit_w * 4;
-			if (xoff + bytes > scanline)
-				bytes = scanline - xoff;
-			memcpy(dst, src + (size_t)y * fsize / h, bytes);
+		const unsigned char *src = frames + (size_t)f * fsize;
+		for (unsigned y = 0; y < th; y++) {
+			unsigned char *dst = fb + (size_t)(yoff + y) * scanline
+					   + (size_t)xoff * 4;
+			const unsigned char *srcline = src
+				+ (size_t)((unsigned long long)y * h / th) * w * 4;
+			for (unsigned x = 0; x < tw; x++)
+				memcpy(dst + (size_t)x * 4,
+				       srcline + (size_t)((unsigned long long)x * w / tw) * 4,
+				       4);
 		}
 		if (nframes == 1)
 			break;
