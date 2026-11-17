@@ -99,6 +99,8 @@ int main(int argc, char **argv)
 	if (fb == MAP_FAILED) { close(fd); return 1; }
 	memset(fb, 0, screen);		/* black background */
 
+	int once = getenv("SPLASH_ONCE") != NULL;
+
 	for (unsigned f = 0; ; f = (f + 1) % nframes) {
 		const unsigned char *src = frames + (size_t)f * fsize;
 		for (unsigned y = 0; y < th; y++) {
@@ -111,7 +113,7 @@ int main(int argc, char **argv)
 				       srcline + (size_t)((unsigned long long)x * w / tw) * 4,
 				       4);
 		}
-		if (nframes == 1)
+		if (once || nframes == 1)
 			break;
 		if (delay_ms)
 			usleep(delay_ms * 1000u);

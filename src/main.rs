@@ -142,25 +142,33 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
     window.present();
 }
 
-/// Fullscreen animated logo on a black background. The GIF loops on its
-/// own; the fixed play window (SPLASH_SECONDS) ends the phase.
+/// Animated logo on a black background at Apple-logo proportions (~25% of
+/// the screen height, centered). The GIF loops on its own; the fixed play
+/// window (SPLASH_SECONDS) ends the phase.
 fn build_splash_page(stack: &gtk::Stack) {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .build();
 
     let picture = gtk::Picture::new();
+    picture.set_halign(gtk::Align::Center);
+    picture.set_valign(gtk::Align::Center);
     picture.set_hexpand(true);
-    picture.set_vexpand(true);
-    picture.set_margin_top(48);
-    picture.set_margin_bottom(48);
     page.append(&picture);
 
     if let Ok(animation) = gtk::gdk_pixbuf::PixbufAnimation::from_file(PathBuf::from(LOGO_GIF)) {
         let iter = Rc::new(RefCell::new(
             animation.iter(Some(std::time::SystemTime::now())),
         ));
-        picture.set_pixbuf(Some(&iter.borrow().pixbuf()));
+        // Apple-boot-logo proportions: keep the animation small and
+        // centered (GtkPicture scales its paintable inside the requested
+        // area while preserving the aspect ratio).
+        let first = iter.borrow().pixbuf();
+        let (pw, ph) = (first.width().max(1), first.height().max(1));
+        let target_h = 200;
+        let target_w = ((target_h as f64) * pw as f64 / ph as f64).round() as i32;
+        picture.set_size_request(target_w, target_h);
+        picture.set_pixbuf(Some(&first));
         let iter_frame = iter.clone();
         let picture_frame = picture.clone();
         glib::timeout_add_local(
