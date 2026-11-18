@@ -25,6 +25,7 @@
  * supported, so callers can fall back to the text console silently.
  */
 #include <fcntl.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +130,47 @@ static void blit_frame(const unsigned char *src, unsigned sw,
 	}
 }
 
+/* Hide the text console so fbcon does not repaint over the logo.
+ * The vtconsole numbering is not stable (vtcon0 is fbcon on this kernel,
+ * vtcon1 is the dummy console), so match the name instead of assuming. */
+static void fbcon_unbind(void)
+{
+	DIR *dir = opendir("/sys/class/vtconsole");
+	struct dirent *ent;
+	char path[512], name[128];
+
+	if (!dir)
+		return;
+	while ((ent = readdir(dir)) != NULL) {
+		int fd, n;
+
+		if (strncmp(ent->d_name, "vtcon", 5) != 0)
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/class/vtconsole/%s/name",
+			 ent->d_name);
+		fd = open(path, O_RDONLY);
+		if (fd < 0)
+			continue;
+		n = (int)read(fd, name, sizeof(name) - 1);
+		close(fd);
+		if (n <= 0)
+			continue;
+		name[n] = '\0';
+		if (strstr(name, "frame buffer") == NULL)
+			continue;
+
+		snprintf(path, sizeof(path), "/sys/class/vtconsole/%s/bind",
+			 ent->d_name);
+		fd = open(path, O_WRONLY);
+		if (fd >= 0) {
+			(void)!write(fd, "0", 1);
+			close(fd);
+		}
+	}
+	closedir(dir);
+}
+
 int main(int argc, char **argv)
 {
 	const char *fbdev = getenv("FB0") ? : "/dev/fb0";
@@ -226,12 +268,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* hide the text console so fbcon does not repaint over the logo */
-	int vtc = open("/sys/class/vtconsole/vtcon1/bind", O_WRONLY);
-	if (vtc >= 0) {
-		(void)!write(vtc, "0", 1);
-		close(vtc);
-	}
+	fbcon_unbind();
 
 	unsigned char *fb = mmap(NULL, screen, PROT_WRITE, MAP_SHARED, fd, 0);
 	if (fb == MAP_FAILED) {

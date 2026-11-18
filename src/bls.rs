@@ -18,7 +18,7 @@
 use std::path::Path;
 
 /// A bootable entry (BLS type 1).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BootEntry {
     /// Entry id: the config file name without its .conf suffix.
     pub id: String,
@@ -40,9 +40,6 @@ fn read_lines(path: &Path) -> Vec<String> {
 }
 
 /// Parse `loader.conf` -> (default entry id, timeout in seconds).
-/// Unused while the dev flow launches only --splash/--menu (no countdown);
-/// kept for the packaged-manager phase.
-#[allow(dead_code)]
 pub fn parse_loader_conf(boot_dir: &Path) -> (Option<String>, u32) {
     let mut default = None;
     let mut timeout: u32 = 5;
@@ -114,15 +111,18 @@ pub fn scan_entries(boot_dir: &Path) -> Vec<BootEntry> {
 }
 
 /// Resolve which entry boots by default (loader.conf `default`, glob-style
-/// suffix match per BLS, otherwise the first entry). Unused without the
-/// countdown phase; kept for the packaged-manager phase.
-#[allow(dead_code)]
+/// suffix match per BLS, otherwise the first entry).
 pub fn default_entry<'a>(entries: &'a [BootEntry], default: &Option<String>) -> Option<&'a BootEntry> {
-    let default_id = default.as_deref()?;
-    entries
-        .iter()
-        .find(|e| e.id == default_id || e.id.ends_with(default_id) || e.id.starts_with(default_id))
-        .or_else(|| entries.first())
+    if let Some(default_id) = default.as_deref() {
+        if let Some(entry) = entries.iter().find(|e| {
+            e.id == default_id
+                || e.id.ends_with(default_id)
+                || e.id.starts_with(default_id)
+        }) {
+            return Some(entry);
+        }
+    }
+    entries.first()
 }
 
 #[cfg(test)]

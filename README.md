@@ -14,8 +14,35 @@ firmware (UEFI) -> SplashOS kernel (EFI stub) -> read-only root
        |  default entry: auto-booted after `timeout` seconds
        |  hold Super key: boot-options menu
        -> Linux target:      kexec -l <kernel> --initrd <...> --command-line <...>; kexec -e
-       -> foreign EFI (planned): efibootmgr --bootnext <entry>; reboot
+       -> USB (EFI app):     efibootmgr -c ...; efibootmgr --bootnext <entry>; reboot
+       -> optical (EFI):     efibootmgr --bootnext <firmware entry for the drive>; reboot
 ```
+
+## Removable media
+
+While the menu is open the manager polls sysfs once a second and looks for
+bootable USB/optical media. Newly plugged devices appear next to the internal
+BLS entries, with a USB-stick or CD icon and the volume label (or drive
+model) underneath; unplugging removes them again. Detection runs on a worker
+thread because it read-only mounts each media to inspect it, and it caches
+results by (device node, size, filesystem UUID) so nothing is mounted twice.
+
+How a device is booted depends on what is on it:
+
+- a BLS tree (`loader/entries/*.conf`) — kexec (the media is mounted, the
+  kernel/initrd are loaded, the media is unmounted, then `kexec -e`)
+- a GRUB or isolinux/syslinux config — the first/default menu entry is
+  kexec'ed the same way (live Linux discs/installers)
+- only `EFI/BOOT/BOOT*.EFI` (Windows/Ubuntu installers) — a one-shot firmware
+  boot entry is created (`efibootmgr --bootnext`) and the machine reboots
+  into it; optical media use the firmware's existing boot option for the
+  drive
+- anything else (exFAT/NTFS/UDF-only data media) is not bootable and is not
+  shown
+
+`--list-devices` prints the scanner's result (device, route, parsed boot
+entries) without starting GTK; it is the easiest way to debug a stick that
+does not show up.
 
 ## Configuration — Boot Loader Specification
 
@@ -30,13 +57,14 @@ point at their kernel/initrd/cmdline on disk.
 - BLS entry parsing (`src/bls.rs`, dependency-free)
 - countdown to default boot; Super key opens the menu; picking an entry
   boots it via kexec (`src/boot.rs`)
-- `--dry-run` prints the kexec commands instead of executing them
+- hotplug detection of bootable USB/optical media (`src/devices.rs`)
+- `--dry-run` prints the boot commands instead of executing them
 - `--boot-dir <path>` to point at any $BOOT tree (development/testing)
+- `--list-devices` dumps the hotplug scanner's results
 
 ## Later phases
 
 - diagnostics/rescue tooling inside the UI (read-only root)
-- foreign EFI boot entries via efibootmgr `--bootnext`
 - BuildScripts packaging: `rust` toolchain package + vendored crates
   (kept tiny: gtk4 + libadwaita only, hand-rolled BLS parser instead of
   serde), kiosk integration with cage/seatd
@@ -44,8 +72,9 @@ point at their kernel/initrd/cmdline on disk.
 ## Development
 
 ```sh
-cargo test                                   # BLS parser tests (no GTK needed to run logic tests? needs gtk dev libs to link)
+cargo test                                   # BLS parser + device/GRUB/isolinux parser tests
 cargo run -- --dry-run --boot-dir ./example-boot
+sudo ./target/debug/splash-boot-manager --list-devices   # what the hotplug scanner sees
 ```
 
 `example-boot/` provides a sample `$BOOT` tree with BLS entries for
