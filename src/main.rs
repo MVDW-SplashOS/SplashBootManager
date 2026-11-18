@@ -21,10 +21,10 @@ mod bls;
 mod boot;
 mod devices;
 
+use adw::prelude::*;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
-use adw::prelude::*;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -88,7 +88,11 @@ fn main() -> glib::ExitCode {
                 devices::BootKind::Kexec {
                     entries, default, ..
                 } => {
-                    println!("    kexec, {} entries, default {:?}", entries.len(), default);
+                    println!(
+                        "    kexec, {} entries, default {:?}",
+                        entries.len(),
+                        default
+                    );
                     for entry in entries {
                         println!(
                             "    - {}  {}  [{}]",
@@ -131,7 +135,8 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
     // Apple-picker style: force libadwaita dark, paint the window black.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
     let css = gtk::CssProvider::new();
-    css.load_from_data("
+    css.load_from_data(
+        "
         window { background-color: #000000; }
         .bm-title { color: #d6d6d6; font-weight: 600; font-size: 20px; }
         .bm-caption { color: #e8e8e8; font-weight: 600; font-size: 15px; }
@@ -140,7 +145,8 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
         button.bm-disc { background: transparent; padding: 14px 10px 10px; }
         button.bm-disc:hover { background: rgba(255,255,255,0.08); border-radius: 18px; }
         button.bm-disc:focus { background: rgba(255,255,255,0.12); border-radius: 18px; }
-    ");
+    ",
+    );
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("no display"),
         &css,
@@ -370,11 +376,7 @@ fn entry_button(entry: &bls::BootEntry, dry_run: bool, status: gtk::Label) -> gt
     button
 }
 
-fn device_button(
-    device: &devices::BootDevice,
-    dry_run: bool,
-    status: gtk::Label,
-) -> gtk::Button {
+fn device_button(device: &devices::BootDevice, dry_run: bool, status: gtk::Label) -> gtk::Button {
     let icon = match device.kind {
         devices::DeviceKind::Usb => DiscIcon::Usb,
         devices::DeviceKind::Optical => DiscIcon::Optical,
@@ -398,9 +400,7 @@ enum DiscIcon {
 
 /// A single Apple-style disc icon button.
 fn disc_button(title: &str, detail: Option<&str>, icon: DiscIcon) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .css_classes(vec!["bm-disc"])
-        .build();
+    let button = gtk::Button::builder().css_classes(vec!["bm-disc"]).build();
 
     let inner = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)

@@ -188,9 +188,7 @@ fn scan_with_cache(cache: &mut HashMap<String, CacheEntry>) -> Vec<BootDevice> {
         }
     }
 
-    found.sort_by(|a, b| {
-        (a.kind, a.title.to_lowercase()).cmp(&(b.kind, b.title.to_lowercase()))
-    });
+    found.sort_by(|a, b| (a.kind, a.title.to_lowercase()).cmp(&(b.kind, b.title.to_lowercase())));
     found
 }
 
@@ -462,11 +460,7 @@ fn parse_isolinux(root: &Path, cfg: &Path) -> Option<BootEntry> {
             &chosen.title
         }),
         linux: media_path(base, &chosen.kernel),
-        initrd: chosen
-            .initrd
-            .iter()
-            .map(|p| media_path(base, p))
-            .collect(),
+        initrd: chosen.initrd.iter().map(|p| media_path(base, p)).collect(),
         options: clean_options(&chosen.append),
     })
 }
@@ -487,9 +481,7 @@ fn media_path(base: &Path, path: &str) -> String {
 fn expand_vars(value: &str) -> String {
     // Debian live's GRUB config uses findiso=${iso_path}; when booting the
     // media itself the path is empty (live-boot then finds the CD/USB).
-    value
-        .replace("${iso_path}", "")
-        .replace("$iso_path", "")
+    value.replace("${iso_path}", "").replace("$iso_path", "")
 }
 
 /// Collapse whitespace and drop now-empty assignments such as `findiso=`
@@ -646,17 +638,13 @@ pub fn mount_media(devnode: &str, fstype: &str) -> Result<Mount, String> {
     // A previous probe may have been killed mid-mount (e.g. by a kexec).
     let _ = run_quiet(umount_bin(), &[&dir_s], 5);
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     match run_quiet(
         mount_bin(),
         &["-o", "ro", "-t", fstype, devnode, &dir_s],
         15,
     ) {
-        Ok(()) => Ok(Mount {
-            dir,
-            mounted: true,
-        }),
+        Ok(()) => Ok(Mount { dir, mounted: true }),
         Err(err) => {
             let _ = fs::remove_dir(&dir);
             Err(err)
@@ -719,12 +707,7 @@ fn umount_bin() -> &'static str {
 }
 
 fn blkid_bin() -> &'static str {
-    first_existing(&[
-        "/sbin/blkid",
-        "/usr/sbin/blkid",
-        "/usr/bin/blkid",
-        "blkid",
-    ])
+    first_existing(&["/sbin/blkid", "/usr/sbin/blkid", "/usr/bin/blkid", "blkid"])
 }
 
 fn first_existing(paths: &[&'static str]) -> &'static str {
@@ -925,9 +908,7 @@ fn candidates() -> Vec<Candidate> {
             if size == 0 {
                 continue;
             }
-            let partition = read_trim(&link.join("partition"))
-                .parse::<u32>()
-                .ok();
+            let partition = read_trim(&link.join("partition")).parse::<u32>().ok();
             out.push(Candidate {
                 devnode: format!("/dev/{part}"),
                 disk: format!("/dev/{}", group.name),
@@ -1092,7 +1073,9 @@ mod tests {
         fs::write(root.join("loader/loader.conf"), "default splashos\n").unwrap();
 
         match probe_boot_tree(&root, "vfat", DeviceKind::Usb, Some(1), "") {
-            Some(BootKind::Kexec { entries, default, .. }) => {
+            Some(BootKind::Kexec {
+                entries, default, ..
+            }) => {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].title, "SplashOS");
                 assert_eq!(default.as_deref(), Some("splashos"));

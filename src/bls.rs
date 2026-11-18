@@ -112,12 +112,13 @@ pub fn scan_entries(boot_dir: &Path) -> Vec<BootEntry> {
 
 /// Resolve which entry boots by default (loader.conf `default`, glob-style
 /// suffix match per BLS, otherwise the first entry).
-pub fn default_entry<'a>(entries: &'a [BootEntry], default: &Option<String>) -> Option<&'a BootEntry> {
+pub fn default_entry<'a>(
+    entries: &'a [BootEntry],
+    default: &Option<String>,
+) -> Option<&'a BootEntry> {
     if let Some(default_id) = default.as_deref() {
         if let Some(entry) = entries.iter().find(|e| {
-            e.id == default_id
-                || e.id.ends_with(default_id)
-                || e.id.starts_with(default_id)
+            e.id == default_id || e.id.ends_with(default_id) || e.id.starts_with(default_id)
         }) {
             return Some(entry);
         }

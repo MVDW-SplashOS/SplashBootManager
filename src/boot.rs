@@ -17,7 +17,11 @@ fn kexec_bin() -> String {
 }
 
 fn efibootmgr_bin() -> String {
-    first_existing(&["/usr/sbin/efibootmgr", "/sbin/efibootmgr", "/usr/bin/efibootmgr"])
+    first_existing(&[
+        "/usr/sbin/efibootmgr",
+        "/sbin/efibootmgr",
+        "/usr/bin/efibootmgr",
+    ])
 }
 
 fn first_existing(paths: &[&str]) -> String {
@@ -33,11 +37,7 @@ fn first_existing(paths: &[&str]) -> String {
 /// `kexec -l <kernel> [--initrd <f>]... --command-line <options>` then
 /// `kexec -e`.
 pub fn kexec_argv(entry: &BootEntry) -> Vec<Vec<String>> {
-    let mut load = vec![
-        kexec_bin(),
-        "-l".to_string(),
-        entry.linux.clone(),
-    ];
+    let mut load = vec![kexec_bin(), "-l".to_string(), entry.linux.clone()];
     for initrd in &entry.initrd {
         load.push("--initrd".to_string());
         load.push(initrd.clone());
@@ -108,11 +108,7 @@ fn boot_media_kexec(
         .map(|p| dir.join(p.trim_start_matches('/')))
         .collect();
 
-    let mut load = vec![
-        kexec_bin(),
-        "-l".to_string(),
-        kernel.display().to_string(),
-    ];
+    let mut load = vec![kexec_bin(), "-l".to_string(), kernel.display().to_string()];
     for initrd in &initrds {
         load.push("--initrd".to_string());
         load.push(initrd.display().to_string());
@@ -163,12 +159,7 @@ fn boot_media_kexec(
 
 /// Create (or reuse) a firmware boot entry for the EFI application on the
 /// device, make it the next boot target and reboot into the firmware.
-fn efi_boot(
-    device: &BootDevice,
-    loader: &str,
-    part: u32,
-    dry_run: bool,
-) -> Result<(), String> {
+fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Result<(), String> {
     if !Path::new("/sys/firmware/efi").exists() {
         return Err(
             "UEFI firmware boot is unavailable (this system booted in BIOS mode)".to_string(),
@@ -333,14 +324,19 @@ fn reboot_now() -> Result<(), String> {
 }
 
 fn shell_join(argv: &[String]) -> String {
-    argv.iter().map(|a| shell_words_quote(a)).collect::<Vec<_>>().join(" ")
+    argv.iter()
+        .map(|a| shell_words_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_words_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_/.,:@%+=:".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_/.,:@%+=:".contains(c))
+    {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
