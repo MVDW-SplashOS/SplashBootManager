@@ -167,7 +167,11 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
     }
 
     let efibootmgr = efibootmgr_bin();
-    let label = format!("SplashOS {}", device.title);
+    let label = if device.uuid.is_empty() {
+        format!("SplashOS {}", device.title)
+    } else {
+        format!("SplashOS {} [{}]", device.title, device.uuid)
+    };
 
     if dry_run {
         println!(

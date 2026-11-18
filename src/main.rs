@@ -24,7 +24,6 @@ mod devices;
 use adw::prelude::*;
 use gtk::gdk;
 use gtk::glib;
-use gtk::prelude::*;
 
 use std::cell::RefCell;
 use std::path::PathBuf;

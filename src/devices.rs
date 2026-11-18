@@ -85,6 +85,8 @@ pub struct BootDevice {
     /// Whole-disk device node (`/dev/sdb` for `/dev/sdb1`); efibootmgr and
     /// sysfs model lookups use this.
     pub disk: String,
+    /// Filesystem UUID/serial (used to keep firmware boot entries unique).
+    pub uuid: String,
     pub kind: DeviceKind,
     pub title: String,
     /// Small line under the caption, e.g. "USB · 14.9 GB".
@@ -241,6 +243,7 @@ fn probe(cand: &Candidate, info: &BlkInfo) -> Option<BootDevice> {
         key: format!("{}|{}|{}", cand.devnode, cand.size, info.uuid),
         devnode: cand.devnode.clone(),
         disk: cand.disk.clone(),
+        uuid: info.uuid.clone(),
         kind: cand.kind,
         title,
         detail: format!("{} · {}", cand.kind.label(), human_size(cand.size)),
