@@ -102,6 +102,9 @@ fn main() -> glib::ExitCode {
                 devices::BootKind::Efi { loader, part } => {
                     println!("    uefi {loader} (partition {part})");
                 }
+                devices::BootKind::FirmwareEntry { number } => {
+                    println!("    uefi entry Boot{number} (efibootmgr --bootnext + reboot)");
+                }
                 devices::BootKind::Firmware { model } => {
                     println!("    firmware boot ({model})");
                 }
@@ -379,6 +382,7 @@ fn device_button(device: &devices::BootDevice, dry_run: bool, status: gtk::Label
     let icon = match device.kind {
         devices::DeviceKind::Usb => DiscIcon::Usb,
         devices::DeviceKind::Optical => DiscIcon::Optical,
+        devices::DeviceKind::Internal => internal_icon(&device.title),
     };
     let button = disc_button(&device.title, Some(&device.detail), icon);
     let device = device.clone();
@@ -391,10 +395,23 @@ fn device_button(device: &devices::BootDevice, dry_run: bool, status: gtk::Label
     button
 }
 
+/// Pick the icon for an installed-OS disc from its title (vendor glyphs
+/// where we know them, a hard drive otherwise).
+fn internal_icon(title: &str) -> DiscIcon {
+    let title = title.to_lowercase();
+    if title.contains("windows") || title.contains("bootmgfw") {
+        DiscIcon::Windows
+    } else {
+        DiscIcon::Hdd
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DiscIcon {
     Optical,
     Usb,
+    Windows,
+    Hdd,
 }
 
 /// A single Apple-style disc icon button.
@@ -413,6 +430,8 @@ fn disc_button(title: &str, detail: Option<&str>, icon: DiscIcon) -> gtk::Button
     disc.set_draw_func(move |_area, cr, width, height| match icon {
         DiscIcon::Optical => draw_disc(cr, width as f64, height as f64),
         DiscIcon::Usb => draw_usb(cr, width as f64, height as f64),
+        DiscIcon::Windows => draw_windows(cr, width as f64, height as f64),
+        DiscIcon::Hdd => draw_hdd(cr, width as f64, height as f64),
     });
 
     let caption = gtk::Label::new(Some(title));
@@ -579,6 +598,169 @@ fn draw_usb(cr: &gtk::cairo::Context, width: f64, height: f64) {
 }
 
 #[allow(unused_must_use)]
+/// Draw the Windows logo: four tilted panes in the brand blue, sized and
+/// centered like the other disc icons.
+#[allow(unused_must_use)]
+fn draw_windows(cr: &gtk::cairo::Context, width: f64, height: f64) {
+    let s = width.min(height) * 0.62;
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+
+    let pane = s * 0.46;
+    let gap = s * 0.07;
+    let tilt = -0.04; // subtle perspective like the official flag
+
+    // One gradient for all four panes, slightly brighter at the top.
+    let paint = gtk::cairo::LinearGradient::new(cx - s, cy - s, cx + s, cy + s);
+    paint.add_color_stop_rgb(0.0, 0.22, 0.55, 0.92);
+    paint.add_color_stop_rgb(1.0, 0.12, 0.38, 0.78);
+
+    // Four panes; the left column is taller for the perspective tilt.
+    for (x, y, w, h) in [
+        (
+            cx - pane - gap / 2.0,
+            cy - pane * (1.0 + tilt) - gap / 2.0,
+            pane,
+            pane * (1.0 + tilt) * 2.0,
+        ),
+        (
+            cx - pane - gap / 2.0,
+            cy + gap / 2.0,
+            pane,
+            pane * (1.0 - tilt) * 2.0,
+        ),
+        (
+            cx + gap / 2.0,
+            cy - pane * (1.0 + tilt) - gap / 2.0,
+            pane,
+            pane * (1.0 + tilt) * 2.0,
+        ),
+        (
+            cx + gap / 2.0,
+            cy + gap / 2.0,
+            pane,
+            pane * (1.0 - tilt) * 2.0,
+        ),
+    ] {
+        cr.set_source(&paint);
+        rounded_rect(cr, x, y, w, h, pane * 0.10);
+        cr.fill();
+    }
+}
+
+/// Draw an internal hard drive: a rounded enclosure with a visible platter
+/// and actuator arm, plus a small activity LED.
+#[allow(unused_must_use)]
+fn draw_hdd(cr: &gtk::cairo::Context, width: f64, height: f64) {
+    let s = width.min(height) * 0.82;
+    let cx = width / 2.0;
+    let cy = height / 2.0;
+
+    let body_w = s * 0.78;
+    let body_h = s * 0.52;
+    let body_x = cx - body_w / 2.0;
+    let body_y = cy - body_h / 2.0;
+
+    // Enclosure.
+    let body = gtk::cairo::LinearGradient::new(body_x, body_y, body_x, body_y + body_h);
+    body.add_color_stop_rgb(0.0, 0.32, 0.32, 0.35);
+    body.add_color_stop_rgb(0.5, 0.20, 0.20, 0.23);
+    body.add_color_stop_rgb(1.0, 0.13, 0.13, 0.15);
+    cr.set_source(&body);
+    rounded_rect(cr, body_x, body_y, body_w, body_h, s * 0.06);
+    cr.fill_preserve();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
+    cr.set_line_width(1.2);
+    cr.stroke();
+
+    // Platter recess and platter.
+    let platter_r = body_h * 0.30;
+    let platter_cx = body_x + body_w * 0.34;
+    let platter_cy = body_y + body_h * 0.52;
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+    cr.arc(
+        platter_cx,
+        platter_cy,
+        platter_r * 1.14,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.fill();
+
+    let platter = gtk::cairo::RadialGradient::new(
+        platter_cx,
+        platter_cy,
+        platter_r * 0.2,
+        platter_cx,
+        platter_cy,
+        platter_r,
+    );
+    platter.add_color_stop_rgb(0.0, 0.62, 0.64, 0.68);
+    platter.add_color_stop_rgb(0.85, 0.45, 0.47, 0.52);
+    platter.add_color_stop_rgb(1.0, 0.58, 0.60, 0.66);
+    cr.set_source(&platter);
+    cr.arc(
+        platter_cx,
+        platter_cy,
+        platter_r,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.fill();
+
+    // Data rings.
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+    cr.set_line_width(0.8);
+    for ring in [0.45, 0.65, 0.82] {
+        cr.arc(
+            platter_cx,
+            platter_cy,
+            platter_r * ring,
+            0.0,
+            std::f64::consts::TAU,
+        );
+        cr.stroke();
+    }
+
+    // Actuator arm reaching from the corner onto the platter.
+    cr.set_source_rgba(0.75, 0.76, 0.80, 0.9);
+    cr.set_line_width(s * 0.022);
+    cr.move_to(body_x + body_w * 0.88, body_y + body_h * 0.14);
+    cr.line_to(platter_cx + platter_r * 0.55, platter_cy - platter_r * 0.55);
+    cr.stroke();
+    cr.set_source_rgba(0.85, 0.86, 0.90, 1.0);
+    cr.arc(
+        platter_cx + platter_r * 0.55,
+        platter_cy - platter_r * 0.55,
+        s * 0.020,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.fill();
+
+    // Spindle hub.
+    cr.set_source_rgba(0.30, 0.31, 0.34, 1.0);
+    cr.arc(
+        platter_cx,
+        platter_cy,
+        platter_r * 0.22,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.fill();
+
+    // Activity LED.
+    cr.set_source_rgba(0.55, 0.75, 0.95, 0.9);
+    cr.arc(
+        body_x + body_w * 0.88,
+        body_y + body_h * 0.82,
+        s * 0.016,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.fill();
+}
+
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let pi = std::f64::consts::PI;
     cr.new_sub_path();

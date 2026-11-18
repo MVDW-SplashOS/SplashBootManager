@@ -14,9 +14,31 @@ firmware (UEFI) -> SplashOS kernel (EFI stub) -> read-only root
        |  default entry: auto-booted after `timeout` seconds
        |  hold Super key: boot-options menu
        -> Linux target:      kexec -l <kernel> --initrd <...> --command-line <...>; kexec -e
+       -> installed OS:      efibootmgr --bootnext <Boot####>; warm reboot
        -> USB (EFI app):     efibootmgr -c ...; efibootmgr --bootnext <entry>; reboot
        -> optical (EFI):     efibootmgr --bootnext <firmware entry for the drive>; reboot
 ```
+
+## Non-Linux operating systems
+
+kexec can only load Linux kernels — so every non-Linux target goes through
+the firmware. On UEFI systems the picker also lists:
+
+- the firmware's existing boot entries (`Boot####`): "Windows Boot Manager",
+  a distro's GRUB/shim, the firmware UI, ... — shown in the firmware's own
+  boot order with a `UEFI · Boot0003` caption
+- installed ESP loaders on internal disks that no entry covers yet: Windows
+  (`EFI/Microsoft/Boot/bootmgfw.efi`), distro shims/GRUBs (`EFI/ubuntu/...`),
+  systemd-boot, rEFInd, Apple loaders — with their distro name
+
+Selecting one sets `efibootmgr --bootnext <entry>` and warm-reboots the
+machine into it; a missing entry is created on the fly (labeled
+`SplashOS <name> [<fs-uuid>]` so a different stick never reuses it).
+
+BIOS systems have no firmware interface, so the UEFI discs are not offered
+there (and `Boot failed: UEFI firmware boot is unavailable...` is what a
+BIOS boot of such a target reports). Internal Linux roots (BLS/GRUB trees)
+are still kexec-able on BIOS machines.
 
 ## Removable media
 
@@ -58,6 +80,8 @@ point at their kernel/initrd/cmdline on disk.
 - countdown to default boot; Super key opens the menu; picking an entry
   boots it via kexec (`src/boot.rs`)
 - hotplug detection of bootable USB/optical media (`src/devices.rs`)
+- installed non-Linux OSes via the firmware (`efibootmgr --bootnext` + warm
+  reboot): existing `Boot####` entries and ESP loaders on internal disks
 - `--dry-run` prints the boot commands instead of executing them
 - `--boot-dir <path>` to point at any $BOOT tree (development/testing)
 - `--list-devices` dumps the hotplug scanner's results

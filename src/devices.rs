@@ -1,15 +1,24 @@
-//! Hotplug detection of bootable removable media (USB sticks, CD/DVD).
+//! Detection of everything the picker can boot: removable media (USB
+//! sticks, CD/DVD), other installed operating systems (UEFI boot entries and
+//! ESP loaders on internal disks) and other Linux roots.
+//!
+//! kexec can only load Linux kernels, so every non-Linux target goes through
+//! the firmware instead: an existing `Boot####` entry (Windows Boot Manager,
+//! a distro's GRUB, ...) is selected with `efibootmgr --bootnext` and the
+//! machine warm-reboots into it. That route needs UEFI — in BIOS mode only
+//! kexec-able targets exist and none of the UEFI discs are shown.
 //!
 //! The boot-manager phase normally runs *without* udev (the dev init starts
 //! udevd only for the graphical menu), so this watches sysfs directly. Once
 //! a second it enumerates `/sys/class/block`, keeps the devices that hang off
-//! a USB bus (or an optical drive), read-only mounts newly appeared media and
-//! looks for a boot configuration:
+//! a USB bus (or an optical drive, or — on UEFI systems — internal disks with
+//! a bootable tree), read-only mounts them and looks for a boot configuration:
 //!
 //!   * a BLS tree (`loader/entries/*.conf`)              -> kexec
 //!   * a GRUB config (`boot/grub/grub.cfg`, ...)         -> kexec
 //!   * an isolinux/syslinux config                       -> kexec
-//!   * `EFI/BOOT/BOOT*.EFI`                              -> firmware / kexec
+//!   * `EFI/BOOT/BOOT*.EFI` (ESP loaders, media)         -> firmware / kexec
+//!   * the firmware's own `Boot####` entries             -> firmware
 //!
 //! Mounting is the only reliable way to tell a bootable USB stick from a
 //! random data stick, but it is too slow (and can spin up an optical drive
@@ -42,6 +51,9 @@ const NEGATIVE_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeviceKind {
+    /// An internal disk / firmware boot entry (an installed OS). Sorted
+    /// first: internal boot choices before removable media.
+    Internal,
     /// USB mass storage (stick, external disk) or any other removable disk.
     Usb,
     /// Optical drive (CD/DVD).
@@ -51,6 +63,7 @@ pub enum DeviceKind {
 impl DeviceKind {
     pub fn label(self) -> &'static str {
         match self {
+            DeviceKind::Internal => "UEFI",
             DeviceKind::Usb => "USB",
             DeviceKind::Optical => "CD-ROM",
         }
@@ -71,9 +84,26 @@ pub enum BootKind {
     /// An EFI application on a partition (`EFI/BOOT/BOOTX64.EFI`, ...).
     /// Booted by handing the next boot to the firmware (`efibootmgr`).
     Efi { loader: String, part: u32 },
+    /// An existing firmware boot entry (`Boot0003 Windows Boot Manager`):
+    /// selected with `efibootmgr --bootnext` and a warm reboot. This is the
+    /// route for every installed non-Linux OS.
+    FirmwareEntry { number: String },
     /// Bootable optical media with no kexec-able kernel. Firmware boot
     /// entries are matched against the drive model.
     Firmware { model: String },
+}
+
+/// One `Boot####` entry from `efibootmgr` output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirmwareEntry {
+    /// Hex entry number, uppercase (e.g. `0003`).
+    pub number: String,
+    /// Human label, e.g. `Windows Boot Manager`.
+    pub label: String,
+    /// Loader path from the device path (`File(\EFI\...EFI)`), normalized
+    /// for dedupe against ESP scans; `None` when the entry points at
+    /// something else (firmware UI, shell, network).
+    pub file: Option<String>,
 }
 
 /// A bootable device shown in the picker.
@@ -130,10 +160,10 @@ pub fn spawn_watcher(tx: Sender<Vec<BootDevice>>) {
     let _ = thread::Builder::new()
         .name("splash-device-watch".to_string())
         .spawn(move || {
-            let mut cache: HashMap<String, CacheEntry> = HashMap::new();
+            let mut state = ScanState::default();
             let mut last: Option<Vec<BootDevice>> = None;
             loop {
-                let list = scan_with_cache(&mut cache);
+                let list = scan_with_cache(&mut state);
                 if last.as_ref() != Some(&list) {
                     if tx.send(list.clone()).is_err() {
                         break; // UI is gone (kexec / exit)
@@ -147,8 +177,25 @@ pub fn spawn_watcher(tx: Sender<Vec<BootDevice>>) {
 
 /// One-shot scan (used by `--list-devices` and tests).
 pub fn scan() -> Vec<BootDevice> {
-    scan_with_cache(&mut HashMap::new())
+    scan_with_cache(&mut ScanState::default())
 }
+
+#[derive(Default)]
+struct ScanState {
+    /// Per-device probe cache (device node -> result).
+    media: HashMap<String, CacheEntry>,
+    /// Firmware boot entries, refreshed every `FW_REFRESH` (they rarely
+    /// change while the menu is open, and efivar reads are not free).
+    fw: Option<FwCache>,
+}
+
+struct FwCache {
+    at: Instant,
+    entries: Vec<FirmwareEntry>,
+}
+
+/// How often the firmware boot entry list is re-read.
+const FW_REFRESH: Duration = Duration::from_secs(10);
 
 struct CacheEntry {
     fingerprint: String,
@@ -156,12 +203,36 @@ struct CacheEntry {
     last_try: Instant,
 }
 
-fn scan_with_cache(cache: &mut HashMap<String, CacheEntry>) -> Vec<BootDevice> {
+fn scan_with_cache(state: &mut ScanState) -> Vec<BootDevice> {
     let now = Instant::now();
     let busy = busy_devnums();
     let swaps = swap_devnodes();
+    let fw = fw_entries_cached(state, now);
+    // Loaders already covered by a firmware entry: the ESP scan must not
+    // show "Windows Boot Manager" twice (once as Boot0003, once as a
+    // scanned partition).
+    let fw_files: HashSet<String> = fw.iter().filter_map(|e| e.file.clone()).collect();
+
     let mut found: Vec<BootDevice> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+
+    for entry in fw {
+        let device = BootDevice {
+            key: format!("fw|{}", entry.number),
+            devnode: String::new(),
+            disk: String::new(),
+            uuid: String::new(),
+            kind: DeviceKind::Internal,
+            title: entry.label,
+            detail: format!("UEFI \u{b7} Boot{}", entry.number),
+            boot: BootKind::FirmwareEntry {
+                number: entry.number,
+            },
+        };
+        if seen.insert(device.key.clone()) {
+            found.push(device);
+        }
+    }
 
     for cand in candidates() {
         if busy.contains(&cand.devnum) || swaps.contains(&cand.devnode) {
@@ -174,16 +245,25 @@ fn scan_with_cache(cache: &mut HashMap<String, CacheEntry>) -> Vec<BootDevice> {
         }
         let fp = info.fingerprint(cand.size);
 
-        let device = match cache.get(&cand.devnode) {
+        let device = match state.media.get(&cand.devnode) {
             Some(c) if c.fingerprint == fp => match &c.device {
                 Some(d) => Some(d.clone()),
                 None if now.duration_since(c.last_try) < NEGATIVE_RETRY => None,
-                None => probe_cached(cache, &cand, &info, &fp, now),
+                None => probe_cached(state, &cand, &info, &fp, now),
             },
-            _ => probe_cached(cache, &cand, &info, &fp, now),
+            _ => probe_cached(state, &cand, &info, &fp, now),
         };
 
         if let Some(device) = device {
+            // An ESP loader already owned by a firmware entry would show
+            // twice (e.g. Boot0003 and the same bootmgfw.efi on disk).
+            if let BootKind::Efi { loader, .. } = &device.boot {
+                if let Some(file) = fw_entries_file(loader) {
+                    if fw_files.contains(&file) {
+                        continue;
+                    }
+                }
+            }
             if seen.insert(device.key.clone()) {
                 found.push(device);
             }
@@ -194,15 +274,32 @@ fn scan_with_cache(cache: &mut HashMap<String, CacheEntry>) -> Vec<BootDevice> {
     found
 }
 
+fn fw_entries_cached(state: &mut ScanState, now: Instant) -> Vec<FirmwareEntry> {
+    if !uefi_available() {
+        return Vec::new();
+    }
+    if let Some(cached) = &state.fw {
+        if now.duration_since(cached.at) < FW_REFRESH {
+            return cached.entries.clone();
+        }
+    }
+    let entries = firmware_entries().unwrap_or_default();
+    state.fw = Some(FwCache {
+        at: now,
+        entries: entries.clone(),
+    });
+    entries
+}
+
 fn probe_cached(
-    cache: &mut HashMap<String, CacheEntry>,
+    state: &mut ScanState,
     cand: &Candidate,
     info: &BlkInfo,
     fingerprint: &str,
     now: Instant,
 ) -> Option<BootDevice> {
     let device = probe(cand, info);
-    cache.insert(
+    state.media.insert(
         cand.devnode.clone(),
         CacheEntry {
             fingerprint: fingerprint.to_string(),
@@ -218,22 +315,26 @@ fn probe(cand: &Candidate, info: &BlkInfo) -> Option<BootDevice> {
     // FAT32/iso9660 for bootable images), so an unmountable filesystem is
     // not a boot candidate here.
     let mount = mount_media(&cand.devnode, &info.fstype).ok()?;
-    let boot = probe_boot_tree(
+    let (boot, preferred_title) = probe_boot_tree(
         mount.path(),
         &info.fstype,
         cand.kind,
         cand.partition,
         &cand.model,
-    );
+    )?;
     drop(mount);
-    let boot = boot?;
 
-    let title = if !info.label.trim().is_empty() {
+    let title = if let Some(title) = preferred_title {
+        // ESP loaders carry their own identity ("Windows Boot Manager",
+        // "Ubuntu") which beats the useless ESP volume label.
+        title
+    } else if !info.label.trim().is_empty() {
         info.label.trim().to_string()
     } else if !cand.model.trim().is_empty() {
         cand.model.trim().to_string()
     } else {
         match cand.kind {
+            DeviceKind::Internal => "UEFI boot".to_string(),
             DeviceKind::Optical => "CD-ROM".to_string(),
             DeviceKind::Usb => "USB drive".to_string(),
         }
@@ -251,22 +352,28 @@ fn probe(cand: &Candidate, info: &BlkInfo) -> Option<BootDevice> {
     })
 }
 
+/// Look for a boot configuration on a mounted filesystem. Returns the boot
+/// route plus an optional display title that should take precedence over
+/// the volume label (ESP loaders know their own name).
 fn probe_boot_tree(
     root: &Path,
     fstype: &str,
     kind: DeviceKind,
     partition: Option<u32>,
     model: &str,
-) -> Option<BootKind> {
+) -> Option<(BootKind, Option<String>)> {
     // 1. BLS: the native layout (SplashOS, systemd-boot installs).
     let entries = bls::scan_entries(root);
     if !entries.is_empty() {
         let (default, _timeout) = bls::parse_loader_conf(root);
-        return Some(BootKind::Kexec {
-            fs: fstype.to_string(),
-            entries,
-            default,
-        });
+        return Some((
+            BootKind::Kexec {
+                fs: fstype.to_string(),
+                entries,
+                default,
+            },
+            None,
+        ));
     }
 
     // 2. GRUB / syslinux (distro install and live media).
@@ -279,11 +386,14 @@ fn probe_boot_tree(
     for rel in grub_configs {
         let cfg = root.join(rel);
         if let Some(entry) = parse_grub(root, &cfg) {
-            return Some(BootKind::Kexec {
-                fs: fstype.to_string(),
-                entries: vec![entry],
-                default: None,
-            });
+            return Some((
+                BootKind::Kexec {
+                    fs: fstype.to_string(),
+                    entries: vec![entry],
+                    default: None,
+                },
+                None,
+            ));
         }
     }
 
@@ -296,27 +406,53 @@ fn probe_boot_tree(
     for rel in syslinux_configs {
         let cfg = root.join(rel);
         if let Some(entry) = parse_isolinux(root, &cfg) {
-            return Some(BootKind::Kexec {
-                fs: fstype.to_string(),
-                entries: vec![entry],
-                default: None,
-            });
+            return Some((
+                BootKind::Kexec {
+                    fs: fstype.to_string(),
+                    entries: vec![entry],
+                    default: None,
+                },
+                None,
+            ));
         }
     }
 
-    // 3. An EFI application (Windows/Ubuntu installers, UEFI-only media).
+    // 3. An EFI application (Windows/Ubuntu installers, UEFI-only media,
+    //    installed ESPs).
+    if kind == DeviceKind::Internal {
+        // Internal ESPs: the full loader set, with distro-aware names
+        // (grubx64/shimx64/systemd-boot/bootmgfw), so an installed Windows
+        // or GRUB shows up with its own identity.
+        if let Some((loader, title)) = find_esp_loader(root) {
+            return Some((
+                BootKind::Efi {
+                    loader,
+                    part: partition.unwrap_or(1),
+                },
+                Some(title),
+            ));
+        }
+        return None;
+    }
+
     if let Some(loader) = find_efi_loader(root) {
         if kind == DeviceKind::Optical {
             // El Torito images are not addressable as files: let the
             // firmware boot the drive via its own boot option.
-            return Some(BootKind::Firmware {
-                model: model.to_string(),
-            });
+            return Some((
+                BootKind::Firmware {
+                    model: model.to_string(),
+                },
+                None,
+            ));
         }
-        return Some(BootKind::Efi {
-            loader,
-            part: partition.unwrap_or(1),
-        });
+        return Some((
+            BootKind::Efi {
+                loader,
+                part: partition.unwrap_or(1),
+            },
+            None,
+        ));
     }
 
     None
@@ -590,6 +726,232 @@ fn find_dir_ci(parent: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// True when this system has the UEFI runtime interface (efibootmgr /
+/// efivarfs are usable). BIOS systems cannot reboot into a firmware target,
+/// so no firmware discs are offered there.
+pub fn uefi_available() -> bool {
+    Path::new("/sys/firmware/efi").exists()
+}
+
+/// Read the firmware's boot entries (`efibootmgr`), ordered like the
+/// firmware's own boot menu (`BootOrder`).
+pub fn firmware_entries() -> Result<Vec<FirmwareEntry>, String> {
+    let bin = first_existing(&[
+        "/usr/sbin/efibootmgr",
+        "/sbin/efibootmgr",
+        "/usr/bin/efibootmgr",
+    ]);
+    let output = Command::new(bin)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {bin}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("efibootmgr failed: {}", stderr.trim()));
+    }
+    Ok(parse_efibootmgr(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Parse `efibootmgr` output. Entry lines look like:
+///
+/// ```text
+/// BootOrder: 0003,0001,0000
+/// Boot0000* Firmware UI  	FvVol(7cb8...)
+/// Boot0001  Debian       	HD(2,GPT,...)/File(\EFI\DEBIAN\SHIMX64.EFI)
+/// Boot0002* Windows Boot Manager	HD(2,...)/File(\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI)
+/// ```
+///
+/// The label ends at the first tab or run of 2+ spaces; everything after it
+/// is the device path.
+fn parse_efibootmgr(text: &str) -> Vec<FirmwareEntry> {
+    let mut boot_order: Vec<String> = Vec::new();
+    let mut entries: Vec<FirmwareEntry> = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if let Some(order) = line.strip_prefix("BootOrder:") {
+            boot_order = order
+                .split(',')
+                .map(|n| n.trim().to_ascii_uppercase())
+                .filter(|n| n.len() == 4 && n.chars().all(|c| c.is_ascii_hexdigit()))
+                .collect();
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("Boot") else {
+            continue;
+        };
+        if rest.len() < 5 {
+            continue;
+        }
+        let (number, tail) = rest.split_at(4);
+        if !number.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue; // BootCurrent/BootNext/Timeout/...
+        }
+        let tail = tail.strip_prefix('*').unwrap_or(tail);
+        // After the number: "* " for active entries, "  " for inactive.
+        let tail = tail.trim_start_matches(' ');
+        let (label, path) = split_label_path(tail);
+        if label.is_empty() {
+            continue;
+        }
+        entries.push(FirmwareEntry {
+            number: number.to_ascii_uppercase(),
+            label: label.to_string(),
+            file: path
+                .and_then(|p| device_path_file(&p))
+                .map(|p| normalize_loader(&p)),
+        });
+    }
+
+    // Follow the firmware's own boot order; entries not listed go last.
+    entries.sort_by_key(|e| {
+        boot_order
+            .iter()
+            .position(|n| *n == e.number)
+            .unwrap_or(usize::MAX)
+    });
+    entries
+}
+
+/// Split `label  HD(...)/File(...)` into (label, device-path tail). The
+/// separator is a tab or a run of at least two spaces (labels may contain
+/// single spaces: "Windows Boot Manager").
+fn split_label_path(tail: &str) -> (&str, Option<&str>) {
+    let bytes = tail.as_bytes();
+    let mut end = None;
+    for (i, window) in bytes.windows(2).enumerate() {
+        if window == b"\t\t" || window[0] == b'\t' {
+            end = Some(i);
+            break;
+        }
+        if window == b"  " {
+            end = Some(i);
+            break;
+        }
+    }
+    match end {
+        Some(i) => (tail[..i].trim_end(), Some(tail[i..].trim())),
+        None => (tail.trim_end(), None),
+    }
+}
+
+/// Extract the `File(\EFI\...EFI)` path from an efibootmgr device path.
+fn device_path_file(path: &str) -> Option<String> {
+    let start = path.find("File(")? + 5;
+    let rest = &path[start..];
+    let end = rest.find(')')?;
+    Some(rest[..end].to_string())
+}
+
+/// Normalize a loader path (backslashes or slashes, any case) for dedupe
+/// comparisons: `"\EFI\Microsoft\Boot\BOOTMGFW.EFI"` and
+/// `"/efi/microsoft/boot/bootmgfw.efi"` collapse to the same key.
+fn normalize_loader(path: &str) -> String {
+    format!(
+        "/{}",
+        path.trim()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_lowercase()
+    )
+}
+
+/// Dedupe helper: the normalized form of a scanned loader path, used to
+/// compare it against firmware entry `File(...)` paths.
+fn fw_entries_file(loader: &str) -> Option<String> {
+    Some(normalize_loader(loader))
+}
+
+/// Find the bootable EFI application on an internal ESP and return the
+/// backslash path efibootmgr expects plus a display title. Unlike removable
+/// media, installed systems are recognized beyond the Microsoft fallback:
+/// distro GRUB/shim installs, systemd-boot, rEFInd, Apple loaders.
+fn find_esp_loader(root: &Path) -> Option<(String, String)> {
+    let efi = find_dir_ci(root, "efi")?;
+    let mut found: Vec<(PathBuf, u8, String)> = Vec::new();
+    collect_esp_loaders(&efi, 0, &mut found);
+
+    found.sort_by(|a, b| (a.1, &a.2).cmp(&(b.1, &b.2)));
+    let (path, _, title) = found.into_iter().next()?;
+
+    // Rebuild the path from the *actual* directory names (FAT is case
+    // insensitive; efibootmgr wants the on-disk case).
+    let parts: Vec<String> = path
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    Some((format!("\\{}", parts.join("\\")), title))
+}
+
+/// Walk `EFI/<vendor>/<maybe subdir>/<file>.efi` (depth-limited) and
+/// classify every recognized loader with a match weight.
+fn collect_esp_loaders(dir: &Path, depth: u8, out: &mut Vec<(PathBuf, u8, String)>) {
+    if depth > 2 {
+        return;
+    }
+    let vendor = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    for path in read_dir_sorted(dir) {
+        if path.is_dir() {
+            collect_esp_loaders(&path, depth + 1, out);
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_lowercase()) else {
+            continue;
+        };
+        if !name.ends_with(".efi") {
+            continue;
+        }
+
+        let (weight, title) = if name == "bootmgfw.efi" {
+            (0u8, "Windows Boot Manager".to_string())
+        } else if vendor == "apple" {
+            (1u8, "macOS".to_string())
+        } else if name.starts_with("shim") {
+            (2u8, esp_distro_title(&vendor, "shim"))
+        } else if name.starts_with("systemd-boot") {
+            (2u8, "systemd-boot".to_string())
+        } else if name.starts_with("refind") {
+            (2u8, "rEFInd".to_string())
+        } else if name.starts_with("grub") {
+            (3u8, esp_distro_title(&vendor, "grub"))
+        } else if name.starts_with("boot") {
+            // EFI/BOOT/BOOTX64.EFI and friends: generic fallback loader.
+            (4u8, "EFI Boot".to_string())
+        } else {
+            continue;
+        };
+        out.push((path, weight, title));
+    }
+}
+
+/// Display title for a distro loader living in `EFI/<vendor>/`
+/// (`ubuntu` -> "Ubuntu", `pop_os` -> "Pop os", `debian` -> "Debian").
+fn esp_distro_title(vendor: &str, loader: &str) -> String {
+    let mut title = String::new();
+    for word in vendor.split(['_', '-']).filter(|w| !w.is_empty()) {
+        let mut chars = word.chars();
+        title.extend(
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .into_iter()
+                .chain(chars),
+        );
+        title.push(' ');
+    }
+    let title = title.trim_end();
+    if title.is_empty() || title.eq_ignore_ascii_case("efi") || title.eq_ignore_ascii_case("boot") {
+        return format!("UEFI ({loader})");
+    }
+    title.to_string()
+}
+
 fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
@@ -844,13 +1206,19 @@ fn candidates() -> Vec<Candidate> {
         let disk_path = fs::canonicalize(&group.link).unwrap_or_else(|_| group.link.clone());
         let path_s = disk_path.to_string_lossy();
         let removable = read_trim(&group.link.join("removable")) == "1";
-        if !optical && !(usb_ancestor(&path_s) || removable) {
-            continue;
-        }
+        let usb = usb_ancestor(&path_s) || removable;
         let kind = if optical {
             DeviceKind::Optical
-        } else {
+        } else if usb {
             DeviceKind::Usb
+        } else if uefi_available() {
+            // Internal disks carry installed operating systems (ESP loaders,
+            // other Linux roots). Only interesting on UEFI systems — in BIOS
+            // mode nothing on them can be booted by the firmware route and
+            // the installed OSes are unreachable for kexec.
+            DeviceKind::Internal
+        } else {
+            continue;
         };
         let model = device_model(&group.link);
         let disk_devnode = format!("/dev/{}", group.name);
@@ -877,18 +1245,25 @@ fn candidates() -> Vec<Candidate> {
         // disk and a partition table with an EFI partition next to it. The
         // boot config lives on the iso9660 filesystem, so prefer the whole
         // disk and ignore its partitions in that case.
-        let whole_info = blkid(&disk_devnode);
-        if whole_info.fstype == "iso9660" {
-            let devnum = read_trim(&group.link.join("dev"));
-            out.push(Candidate {
-                devnode: disk_devnode,
-                disk: format!("/dev/{}", group.name),
-                kind,
-                partition: None,
-                size: disk_size,
-                model,
-                devnum,
-            });
+        if kind == DeviceKind::Usb {
+            let whole_info = blkid(&disk_devnode);
+            if whole_info.fstype == "iso9660" {
+                let devnum = read_trim(&group.link.join("dev"));
+                out.push(Candidate {
+                    devnode: disk_devnode,
+                    disk: format!("/dev/{}", group.name),
+                    kind,
+                    partition: None,
+                    size: disk_size,
+                    model,
+                    devnum,
+                });
+                continue;
+            }
+        }
+
+        if kind == DeviceKind::Internal && group.parts.is_empty() {
+            // A partitionless internal disk is not a boot target.
             continue;
         }
 
@@ -1043,6 +1418,83 @@ mod tests {
     }
 
     #[test]
+    fn parses_efibootmgr_entries() {
+        let text = "BootCurrent: 0002\n\
+                    Timeout: 1 seconds\n\
+                    BootOrder: 0002,0000\n\
+                    Boot0000* Firmware UI  \tFvVol(7cb8bdc9)\n\
+                    Boot0001  Debian  \tHD(2,GPT,1234)/File(\\EFI\\debian\\shimx64.EFI)\n\
+                    Boot0002* Windows Boot Manager\tHD(2,GPT,5678)/File(\\EFI\\microsoft\\Boot\\bootmgfw.EFI)\n\
+                    Boot0003* Orphan Entry\tHD(1,GPT,9abc)\n";
+
+        let entries = parse_efibootmgr(text);
+        assert_eq!(entries.len(), 4);
+
+        // Ordered like the firmware's boot menu (BootOrder first, then
+        // unlisted entries in output order), labels keep their spaces,
+        // inactive entries (no '*') are still listed.
+        let numbers: Vec<&str> = entries.iter().map(|e| e.number.as_str()).collect();
+        assert_eq!(numbers, vec!["0002", "0000", "0001", "0003"]);
+
+        assert_eq!(entries[0].label, "Windows Boot Manager");
+        assert_eq!(
+            entries[0].file.as_deref(),
+            Some("/efi/microsoft/boot/bootmgfw.efi")
+        );
+        assert_eq!(entries[1].label, "Firmware UI");
+        assert_eq!(entries[1].file, None);
+        assert_eq!(entries[2].label, "Debian");
+        assert_eq!(entries[2].file.as_deref(), Some("/efi/debian/shimx64.efi"));
+
+        // Duplicate ESP loaders collapse: a scanned bootmgfw.efi matches the
+        // Boot0002 File path.
+        assert_eq!(
+            normalize_loader("\\EFI\\Microsoft\\Boot\\BOOTMGFW.EFI"),
+            entries[0].file.clone().unwrap()
+        );
+    }
+
+    #[test]
+    fn finds_esp_loaders_with_distro_titles() {
+        let win = temp_dir("esp-win");
+        fs::create_dir_all(win.join("EFI/Microsoft/Boot")).unwrap();
+        fs::write(win.join("EFI/Microsoft/Boot/bootmgfw.efi"), b"x").unwrap();
+        fs::create_dir_all(win.join("EFI/BOOT")).unwrap();
+        fs::write(win.join("EFI/BOOT/BOOTX64.EFI"), b"x").unwrap();
+        // Microsoft wins over the generic fallback.
+        assert_eq!(
+            find_esp_loader(&win),
+            Some((
+                "\\EFI\\Microsoft\\Boot\\bootmgfw.efi".to_string(),
+                "Windows Boot Manager".to_string()
+            ))
+        );
+        fs::remove_dir_all(&win).unwrap();
+
+        let distro = temp_dir("esp-distro");
+        fs::create_dir_all(distro.join("EFI/ubuntu")).unwrap();
+        fs::write(distro.join("EFI/ubuntu/shimx64.efi"), b"x").unwrap();
+        assert_eq!(
+            find_esp_loader(&distro)
+                .map(|(_, title)| title)
+                .unwrap_or_default(),
+            "Ubuntu"
+        );
+        fs::remove_dir_all(&distro).unwrap();
+
+        let systemd = temp_dir("esp-sd");
+        fs::create_dir_all(systemd.join("EFI/systemd")).unwrap();
+        fs::write(systemd.join("EFI/systemd/systemd-bootx64.efi"), b"x").unwrap();
+        assert_eq!(
+            find_esp_loader(&systemd)
+                .map(|(_, title)| title)
+                .unwrap_or_default(),
+            "systemd-boot"
+        );
+        fs::remove_dir_all(&systemd).unwrap();
+    }
+
+    #[test]
     fn finds_efi_loader_case_insensitively() {
         let root = temp_dir("efi");
         fs::create_dir_all(root.join("EFI/BOOT")).unwrap();
@@ -1076,9 +1528,12 @@ mod tests {
         fs::write(root.join("loader/loader.conf"), "default splashos\n").unwrap();
 
         match probe_boot_tree(&root, "vfat", DeviceKind::Usb, Some(1), "") {
-            Some(BootKind::Kexec {
-                entries, default, ..
-            }) => {
+            Some((
+                BootKind::Kexec {
+                    entries, default, ..
+                },
+                _title,
+            )) => {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].title, "SplashOS");
                 assert_eq!(default.as_deref(), Some("splashos"));

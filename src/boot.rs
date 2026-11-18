@@ -73,7 +73,7 @@ pub fn boot(entry: &BootEntry, dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Boot a hot-plugged device.
+/// Boot a hot-plugged device or firmware disc.
 pub fn boot_device(device: &BootDevice, dry_run: bool) -> Result<(), String> {
     match &device.boot {
         BootKind::Kexec {
@@ -87,6 +87,7 @@ pub fn boot_device(device: &BootDevice, dry_run: bool) -> Result<(), String> {
             boot_media_kexec(device, fs, &entry, dry_run)
         }
         BootKind::Efi { loader, part } => efi_boot(device, loader, *part, dry_run),
+        BootKind::FirmwareEntry { number } => firmware_entry_boot(number, dry_run),
         BootKind::Firmware { model } => firmware_boot(model, dry_run),
     }
 }
@@ -184,7 +185,7 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
     }
 
     ensure_efivars()?;
-    let number = match find_boot_entry(&efibootmgr, &label)? {
+    let number = match find_boot_entry(&label)? {
         Some(number) => number,
         None => {
             let output = Command::new(&efibootmgr)
@@ -208,12 +209,35 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
                     stderr.trim()
                 ));
             }
-            find_boot_entry(&efibootmgr, &label)?
+            find_boot_entry(&label)?
                 .ok_or_else(|| "efibootmgr did not create a boot entry".to_string())?
         }
     };
 
     set_boot_next(&efibootmgr, &number)?;
+    reboot_now()
+}
+
+/// An existing firmware boot entry (Windows Boot Manager, a distro GRUB,
+/// the firmware UI, ...): make it the next boot target and warm-reboot.
+/// This is the route for every installed non-Linux OS — kexec cannot load
+/// them, but the firmware can.
+fn firmware_entry_boot(number: &str, dry_run: bool) -> Result<(), String> {
+    if !Path::new("/sys/firmware/efi").exists() {
+        return Err(
+            "UEFI firmware boot is unavailable (this system booted in BIOS mode)".to_string(),
+        );
+    }
+
+    let efibootmgr = efibootmgr_bin();
+    if dry_run {
+        println!("dry-run: {efibootmgr} --bootnext {number}");
+        println!("dry-run: sync; echo b > /proc/sysrq-trigger");
+        return Ok(());
+    }
+
+    ensure_efivars()?;
+    set_boot_next(&efibootmgr, number)?;
     reboot_now()
 }
 
@@ -241,14 +265,15 @@ fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
     }
 
     ensure_efivars()?;
-    let entries = boot_entries(&efibootmgr)?;
+    let entries = devices::firmware_entries()?;
     let (number, label) = entries
         .iter()
-        .find(|(_, label)| label.to_lowercase().contains(&needle))
+        .find(|e| e.label.to_lowercase().contains(&needle))
+        .map(|e| (e.number.clone(), e.label.clone()))
         .ok_or_else(|| format!("the firmware has no boot option for “{model}”"))?;
 
     println!("firmware boot: {label}");
-    set_boot_next(&efibootmgr, number)?;
+    set_boot_next(&efibootmgr, &number)?;
     reboot_now()
 }
 
@@ -271,40 +296,13 @@ fn ensure_efivars() -> Result<(), String> {
     }
 }
 
-/// Parse `efibootmgr` output into (Boot####, label) pairs.
-fn boot_entries(efibootmgr: &str) -> Result<Vec<(String, String)>, String> {
-    let output = Command::new(efibootmgr)
-        .output()
-        .map_err(|e| format!("failed to spawn {efibootmgr}: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("efibootmgr failed: {}", stderr.trim()));
-    }
-
-    let mut entries = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let line = line.trim_start();
-        let Some(rest) = line.strip_prefix("Boot") else {
-            continue;
-        };
-        if rest.len() < 4 {
-            continue;
-        }
-        let (number, tail) = rest.split_at(4);
-        if !number.chars().all(|c| c.is_ascii_hexdigit()) {
-            continue; // BootCurrent/BootOrder/...
-        }
-        let label = tail.trim_start_matches('*').trim();
-        entries.push((number.to_ascii_uppercase(), label.to_string()));
-    }
-    Ok(entries)
-}
-
-fn find_boot_entry(efibootmgr: &str, label: &str) -> Result<Option<String>, String> {
-    Ok(boot_entries(efibootmgr)?
+/// Find an existing firmware entry by its exact label (used when reusing a
+/// previously created one-shot entry).
+fn find_boot_entry(label: &str) -> Result<Option<String>, String> {
+    Ok(devices::firmware_entries()?
         .into_iter()
-        .find(|(_, existing)| existing == label)
-        .map(|(number, _)| number))
+        .find(|entry| entry.label == label)
+        .map(|entry| entry.number))
 }
 
 fn set_boot_next(efibootmgr: &str, number: &str) -> Result<(), String> {
