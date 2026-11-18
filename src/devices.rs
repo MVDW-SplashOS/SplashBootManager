@@ -89,8 +89,12 @@ pub enum BootKind {
     /// route for every installed non-Linux OS.
     FirmwareEntry { number: String },
     /// Bootable optical media with no kexec-able kernel. Firmware boot
-    /// entries are matched against the drive model.
-    Firmware { model: String },
+    /// entries are matched against the drive model; when the firmware has
+    /// none, a one-shot entry pointing at the disc's EFI loader is created.
+    Firmware {
+        model: String,
+        loader: Option<String>,
+    },
 }
 
 /// One `Boot####` entry from `efibootmgr` output.
@@ -657,6 +661,7 @@ fn firmware_disc(cand: &Candidate, info: &BlkInfo) -> BootDevice {
         ),
         boot: BootKind::Firmware {
             model: cand.model.clone(),
+            loader: None,
         },
     }
 }
@@ -746,11 +751,13 @@ fn probe_boot_tree(
 
     if let Some(loader) = find_efi_loader(root) {
         if kind == DeviceKind::Optical {
-            // El Torito images are not addressable as files: let the
-            // firmware boot the drive via its own boot option.
+            // El Torito images are not addressable as files: boot the
+            // drive through the firmware, falling back to a created entry
+            // pointing at the EFI loader that *is* readable on the disc.
             return Some((
                 BootKind::Firmware {
                     model: model.to_string(),
+                    loader: Some(loader),
                 },
                 None,
             ));
@@ -1045,6 +1052,19 @@ pub fn uefi_available() -> bool {
 /// Read the firmware's boot entries (`efibootmgr`), ordered like the
 /// firmware's own boot menu (`BootOrder`).
 pub fn firmware_entries() -> Result<Vec<FirmwareEntry>, String> {
+    firmware_entries_and_order().map(|(entries, _)| entries)
+}
+
+/// Current `BootOrder` (entry numbers, uppercase) — used to restore the
+/// firmware's own boot order after creating a one-shot boot entry.
+pub fn firmware_boot_order() -> Vec<String> {
+    firmware_entries_and_order()
+        .map(|(_, order)| order)
+        .unwrap_or_default()
+}
+
+/// Entries plus the firmware's boot order.
+pub fn firmware_entries_and_order() -> Result<(Vec<FirmwareEntry>, Vec<String>), String> {
     ensure_efivars()?;
     let bin = first_existing(&[
         "/usr/sbin/efibootmgr",
@@ -1100,7 +1120,7 @@ pub fn ensure_efivars() -> Result<(), String> {
     }
 }
 
-/// Parse `efibootmgr` output. Entry lines look like:
+/// Parse `efibootmgr` output into (entries, BootOrder). Entry lines look like:
 ///
 /// ```text
 /// BootOrder: 0003,0001,0000
@@ -1111,7 +1131,7 @@ pub fn ensure_efivars() -> Result<(), String> {
 ///
 /// The label ends at the first tab or run of 2+ spaces; everything after it
 /// is the device path.
-fn parse_efibootmgr(text: &str) -> Vec<FirmwareEntry> {
+fn parse_efibootmgr(text: &str) -> (Vec<FirmwareEntry>, Vec<String>) {
     let mut boot_order: Vec<String> = Vec::new();
     let mut entries: Vec<FirmwareEntry> = Vec::new();
 
@@ -1159,7 +1179,7 @@ fn parse_efibootmgr(text: &str) -> Vec<FirmwareEntry> {
             .position(|n| *n == e.number)
             .unwrap_or(usize::MAX)
     });
-    entries
+    (entries, boot_order)
 }
 
 /// Split `label  HD(...)/File(...)` into (label, device-path tail). The
@@ -1796,8 +1816,9 @@ mod tests {
                     Boot0002* Windows Boot Manager\tHD(2,GPT,5678)/File(\\EFI\\microsoft\\Boot\\bootmgfw.EFI)\n\
                     Boot0003* Orphan Entry\tHD(1,GPT,9abc)\n";
 
-        let entries = parse_efibootmgr(text);
+        let (entries, boot_order) = parse_efibootmgr(text);
         assert_eq!(entries.len(), 4);
+        assert_eq!(boot_order, vec!["0002", "0000"]);
 
         // Ordered like the firmware's boot menu (BootOrder first, then
         // unlisted entries in output order), labels keep their spaces,

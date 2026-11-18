@@ -62,6 +62,13 @@ How a device is booted depends on what is on it:
   kernel/initrd are loaded, the media is unmounted, then `kexec -e`)
 - a GRUB or isolinux/syslinux config — the first/default menu entry is
   kexec'ed the same way (live Linux discs/installers)
+- optical media — the firmware route in three tiers: an existing firmware
+  entry naming the drive, then an entry whose device path is a CD/DVD, and
+  finally a one-shot entry created for the drive pointing at the disc's
+  EFI loader (`\EFI\BOOT\BOOTX64.EFI` for Windows install media — the
+  firmware reads the UDF filesystem even when this kernel cannot). The
+  firmware's own boot order is restored after such a creation so every
+  future boot still prefers the installed OS
 - only `EFI/BOOT/BOOT*.EFI` (Windows/Ubuntu installers) — a one-shot firmware
   boot entry is created (`efibootmgr --bootnext`) and the machine reboots
   into it; optical media use the firmware's existing boot option for the

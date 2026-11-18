@@ -87,7 +87,9 @@ pub fn boot_device(device: &BootDevice, dry_run: bool) -> Result<(), String> {
         }
         BootKind::Efi { loader, part } => efi_boot(device, loader, *part, dry_run),
         BootKind::FirmwareEntry { number } => firmware_entry_boot(number, dry_run),
-        BootKind::Firmware { model } => firmware_boot(model, dry_run),
+        BootKind::Firmware { model, loader } => {
+            firmware_boot(device, model, loader.as_deref(), dry_run)
+        }
     }
 }
 
@@ -186,31 +188,11 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
     devices::ensure_efivars()?;
     let number = match find_boot_entry(&label)? {
         Some(number) => number,
-        None => {
-            let output = Command::new(&efibootmgr)
-                .args([
-                    "-c",
-                    "-d",
-                    &device.disk,
-                    "-p",
-                    &part.to_string(),
-                    "-L",
-                    &label,
-                    "-l",
-                    loader,
-                ])
-                .output()
-                .map_err(|e| format!("failed to spawn {efibootmgr}: {e}"))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!(
-                    "efibootmgr could not create a boot entry: {}",
-                    stderr.trim()
-                ));
-            }
-            find_boot_entry(&label)?
-                .ok_or_else(|| "efibootmgr did not create a boot entry".to_string())?
-        }
+        None => create_boot_entry(
+            &efibootmgr,
+            &label,
+            vec!["-d", &device.disk, "-p", &part.to_string(), "-l", loader],
+        )?,
     };
 
     set_boot_next(&efibootmgr, &number)?;
@@ -240,9 +222,18 @@ fn firmware_entry_boot(number: &str, dry_run: bool) -> Result<(), String> {
     reboot_now()
 }
 
-/// Optical media without a kexec-able kernel: the firmware already owns a
-/// boot option for the drive. Match it by model and hand over the next boot.
-fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
+/// Optical media without a kexec-able kernel: three-tier firmware boot —
+/// 1. an existing firmware entry whose label names the drive,
+/// 2. an existing entry whose device path is a CD/DVD,
+/// 3. a one-shot entry created for the drive, pointing at the disc's EFI
+///    loader (or the standard removable-media path — OVMF and most
+///    firmware read UDF, where Windows install media keeps its loader).
+fn firmware_boot(
+    device: &BootDevice,
+    model: &str,
+    loader: Option<&str>,
+    dry_run: bool,
+) -> Result<(), String> {
     if !Path::new("/sys/firmware/efi").exists() {
         return Err(
             "UEFI firmware boot is unavailable (this system booted in BIOS mode)".to_string(),
@@ -258,7 +249,12 @@ fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
 
     if dry_run {
         println!("dry-run: {efibootmgr}  # find a Boot#### option matching '{model}'");
-        println!("dry-run: {efibootmgr} --bootnext <matching entry>");
+        let loader_path = loader.unwrap_or("\\EFI\\BOOT\\BOOTX64.EFI");
+        println!(
+            "dry-run: (no match) {efibootmgr} -c -d {} -L '<unique>' -l '{}'",
+            device.disk, loader_path
+        );
+        println!("dry-run: {efibootmgr} --bootnext <entry>");
         println!("dry-run: sync; echo b > /proc/sysrq-trigger");
         return Ok(());
     }
@@ -269,13 +265,62 @@ fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
     // then the device path: some firmware gives the drive an unhelpful
     // label ("UEFI Misc Device") while the path still identifies the
     // optical device class.
-    let (number, label) = firmware_entry_matching(&entries, &needle)
-        .or_else(|| optical_entry_by_path(&entries))
-        .ok_or_else(|| format!("the firmware has no boot option for “{model}”"))?;
+    if let Some((number, label)) =
+        firmware_entry_matching(&entries, &needle).or_else(|| optical_entry_by_path(&entries))
+    {
+        println!("firmware boot: {label}");
+        set_boot_next(&efibootmgr, &number)?;
+        return reboot_now();
+    }
 
-    println!("firmware boot: {label}");
+    // No firmware entry for the drive (OVMF does not create one for the
+    // DVD at all): create a one-shot entry for the drive itself — note
+    // the missing -p, optical media have no partition table.
+    let loader_path = loader.unwrap_or("\\EFI\\BOOT\\BOOTX64.EFI");
+    let label = if device.uuid.is_empty() {
+        format!("SplashOS {}", device.title)
+    } else {
+        format!("SplashOS {} [{}]", device.title, device.uuid)
+    };
+    let number = create_boot_entry(
+        &efibootmgr,
+        &label,
+        vec!["-d", &device.disk, "-l", loader_path],
+    )?;
+    println!("created firmware entry Boot{number} for the drive");
     set_boot_next(&efibootmgr, &number)?;
     reboot_now()
+}
+
+/// Create a firmware boot entry, restoring the firmware's own boot order
+/// afterwards: `efibootmgr -c` prepends the new entry to BootOrder, which
+/// would otherwise make every future firmware boot prefer the created
+/// entry (e.g. the inserted CD) over the installed OS.
+fn create_boot_entry(efibootmgr: &str, label: &str, args: Vec<&str>) -> Result<String, String> {
+    let order = devices::firmware_boot_order();
+    let output = Command::new(efibootmgr)
+        .arg("-c")
+        .args(["-L", label])
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to spawn {efibootmgr}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "efibootmgr could not create a boot entry: {}",
+            stderr.trim()
+        ));
+    }
+    let number = find_boot_entry(label)?
+        .ok_or_else(|| "efibootmgr did not create a boot entry".to_string())?;
+    if !order.is_empty() {
+        // Best effort: some firmware rejects BootOrder rewrites.
+        let _ = Command::new(efibootmgr)
+            .arg("-o")
+            .arg(order.join(","))
+            .output();
+    }
+    Ok(number)
 }
 
 /// Pick the firmware entry that belongs to a drive: score every entry by

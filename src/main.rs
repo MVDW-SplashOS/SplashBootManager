@@ -108,7 +108,7 @@ fn main() -> glib::ExitCode {
                 devices::BootKind::FirmwareEntry { number } => {
                     println!("    uefi entry Boot{number} (efibootmgr --bootnext + reboot)");
                 }
-                devices::BootKind::Firmware { model } => {
+                devices::BootKind::Firmware { model, .. } => {
                     println!("    firmware boot ({model})");
                 }
             }
