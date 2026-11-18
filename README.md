@@ -51,6 +51,30 @@ cargo run -- --dry-run --boot-dir ./example-boot
 `example-boot/` provides a sample `$BOOT` tree with BLS entries for
 development without a boot environment.
 
+## Boot logo
+
+Two assets ship in `assets/`:
+
+- `boot-logo.raw.xz` — the fbdev splash (`splash-logo.c`), a `SPLASHLOGO2`
+  frame array: 28-byte header (`SPLASHLOGO2\0`, u32 LE width, height, frame
+  count, frame delay in ms) followed by 560×531 BGR24 frames composited over
+  black, 74 frames at 40 ms (25 fps). It is stored xz-compressed because the
+  flat frame array is 66 MB; the build script decompresses it to
+  `/usr/share/splashos/boot-logo.raw`. The player mmaps it and resamples with
+  a box/tent kernel (area averaging when shrinking, bilinear when growing) —
+  point sampling a 560×531 animation down to a ~200 px logo drops most source
+  rows and visibly aliases the edges.
+- `boot-logo.gif` — the GTK splash page (`--splash`). gdk-pixbuf cannot read
+  APNG, so this stays a GIF.
+
+Both represent the same source animation (the APNG export, 74 frames at
+25 fps, 560×531 RGBA); the raw asset is generated with:
+
+```sh
+tools/apng2raw.py splashos_boot.apng -o boot-logo.raw   # ~12 s, needs zlib only
+xz -9 -k boot-logo.raw                                  # -> assets/boot-logo.raw.xz
+```
+
 ## Testing a built boot-manager partition
 
 `install-test-entries.sh` (dev helper, machine-specific) prepares a partition
