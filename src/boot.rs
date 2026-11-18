@@ -8,7 +8,6 @@
 
 use crate::bls::{self, BootEntry};
 use crate::devices::{self, BootDevice, BootKind};
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -184,7 +183,7 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
         return Ok(());
     }
 
-    ensure_efivars()?;
+    devices::ensure_efivars()?;
     let number = match find_boot_entry(&label)? {
         Some(number) => number,
         None => {
@@ -236,7 +235,7 @@ fn firmware_entry_boot(number: &str, dry_run: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    ensure_efivars()?;
+    devices::ensure_efivars()?;
     set_boot_next(&efibootmgr, number)?;
     reboot_now()
 }
@@ -264,9 +263,14 @@ fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    ensure_efivars()?;
+    devices::ensure_efivars()?;
     let entries = devices::firmware_entries()?;
+    // Label scoring first ("QEMU QEMU DVD-ROM" -> "UEFI QEMU DVD-ROM"),
+    // then the device path: some firmware gives the drive an unhelpful
+    // label ("UEFI Misc Device") while the path still identifies the
+    // optical device class.
     let (number, label) = firmware_entry_matching(&entries, &needle)
+        .or_else(|| optical_entry_by_path(&entries))
         .ok_or_else(|| format!("the firmware has no boot option for “{model}”"))?;
 
     println!("firmware boot: {label}");
@@ -302,23 +306,19 @@ fn firmware_entry_matching(
     best.map(|(entry, _)| (entry.number.clone(), entry.label.clone()))
 }
 
-fn ensure_efivars() -> Result<(), String> {
-    let dir = Path::new("/sys/firmware/efi/efivars");
-    if dir.exists() {
-        return Ok(());
-    }
-    // The directory is a sysfs mountpoint placeholder on UEFI systems; if it
-    // is missing the firmware interface is not available at all.
-    let _ = fs::create_dir_all(dir);
-    let status = Command::new(devices::mount_bin())
-        .args(["-t", "efivarfs", "efivarfs", "/sys/firmware/efi/efivars"])
-        .status()
-        .map_err(|e| format!("could not mount efivarfs: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("could not mount efivarfs (no EFI runtime variables?)".to_string())
-    }
+/// Fallback for optical drives: the firmware entry whose device path
+/// identifies a CD/DVD device (`.../CdRom(...)`), regardless of its label.
+fn optical_entry_by_path(entries: &[devices::FirmwareEntry]) -> Option<(String, String)> {
+    entries
+        .iter()
+        .find(|entry| {
+            entry
+                .path
+                .as_deref()
+                .map(|p| p.to_lowercase().contains("cdrom("))
+                .unwrap_or(false)
+        })
+        .map(|entry| (entry.number.clone(), entry.label.clone()))
 }
 
 /// Find an existing firmware entry by its exact label (used when reusing a

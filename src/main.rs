@@ -371,7 +371,9 @@ fn rebuild_discs(manager: &Rc<RefCell<Manager>>, discs: &DiscRow, status: &gtk::
 }
 
 fn entry_button(entry: &bls::BootEntry, dry_run: bool, status: gtk::Label) -> gtk::Button {
-    let button = disc_button(&entry.title, None, DiscIcon::Optical);
+    // Internal entries are installed operating systems: hard-drive look,
+    // distinct from the CD-ROM icon of optical media.
+    let button = disc_button(&entry.title, None, DiscIcon::Hdd);
     let entry = entry.clone();
     button.connect_clicked(move |_| {
         status.set_text(&format!("Booting \u{201c}{}\u{201d}\u{2026}", entry.title));

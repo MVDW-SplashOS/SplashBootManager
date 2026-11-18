@@ -104,6 +104,10 @@ pub struct FirmwareEntry {
     /// for dedupe against ESP scans; `None` when the entry points at
     /// something else (firmware UI, shell, network).
     pub file: Option<String>,
+    /// Raw device path tail (`HD(2,...)/File(...)`) — used to identify a
+    /// drive entry by its device class when the label is unhelpful
+    /// ("UEFI Misc Device" for the SATA CD).
+    pub path: Option<String>,
 }
 
 /// A bootable device shown in the picker.
@@ -223,7 +227,7 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
     state.trace = std::env::var("SPLASH_SCAN_DEBUG").as_deref() == Ok("1") || state.scans == 0;
     let busy = busy_devnums();
     let swaps = swap_devnodes();
-    let fw = fw_entries_cached(state, now);
+    let (fw, fw_ok) = fw_entries_cached(state, now);
     // Loaders already covered by a firmware entry: an internal ESP with
     // bootmgfw.efi must not show twice (once as Boot0003, once as a scanned
     // partition). Removable media are exempt: a firmware entry named
@@ -321,6 +325,24 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
             }
             if device.kind == DeviceKind::Internal {
                 scanned_internal_titles.push(device.title.clone());
+            }
+            // A scanned internal disk can duplicate an internal entry: the
+            // SplashOS/Debian BLS entries ARE snapshots of the same
+            // installs ("SplashOS 0.0.1-dev" scanned off its root, "Debian
+            // GNU/Linux" off the host root). Kexec duplicates are always
+            // dropped — the BLS entry boots the same kernel faster. ESP
+            // loader rows are only dropped when the firmware entry list is
+            // actually readable — otherwise such a loader might be the
+            // only route to that OS.
+            if device.kind == DeviceKind::Internal
+                && match &device.boot {
+                    BootKind::Kexec { .. } => titles_match(&device.title, &internal_titles),
+                    BootKind::Efi { .. } => fw_ok && titles_match(&device.title, &internal_titles),
+                    _ => false,
+                }
+            {
+                trace_candidate(state, &cand, "duplicates an internal entry", None);
+                continue;
             }
             trace_candidate(state, &cand, "bootable", Some(&device));
             if seen.insert(device.key.clone()) {
@@ -463,21 +485,30 @@ fn trace_fw(state: &ScanState, entry: &FirmwareEntry, verdict: &str) {
     );
 }
 
-fn fw_entries_cached(state: &mut ScanState, now: Instant) -> Vec<FirmwareEntry> {
+fn fw_entries_cached(state: &mut ScanState, now: Instant) -> (Vec<FirmwareEntry>, bool) {
     if !uefi_available() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     if let Some(cached) = &state.fw {
         if now.duration_since(cached.at) < FW_REFRESH {
-            return cached.entries.clone();
+            return (cached.entries.clone(), true);
         }
     }
-    let entries = firmware_entries().unwrap_or_default();
-    state.fw = Some(FwCache {
-        at: now,
-        entries: entries.clone(),
-    });
-    entries
+    match firmware_entries() {
+        Ok(entries) => {
+            state.fw = Some(FwCache {
+                at: now,
+                entries: entries.clone(),
+            });
+            (entries, true)
+        }
+        Err(err) => {
+            if state.trace {
+                eprintln!("[sbm-scan] efibootmgr: {err}");
+            }
+            (Vec::new(), false)
+        }
+    }
 }
 
 fn probe_cached(
@@ -1014,6 +1045,7 @@ pub fn uefi_available() -> bool {
 /// Read the firmware's boot entries (`efibootmgr`), ordered like the
 /// firmware's own boot menu (`BootOrder`).
 pub fn firmware_entries() -> Result<Vec<FirmwareEntry>, String> {
+    ensure_efivars()?;
     let bin = first_existing(&[
         "/usr/sbin/efibootmgr",
         "/sbin/efibootmgr",
@@ -1028,6 +1060,44 @@ pub fn firmware_entries() -> Result<Vec<FirmwareEntry>, String> {
         return Err(format!("efibootmgr failed: {}", stderr.trim()));
     }
     Ok(parse_efibootmgr(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// True when efivarfs is actually mounted (not just the empty sysfs
+/// directory that exists on every UEFI system).
+fn efivars_mounted() -> bool {
+    fs::read_to_string("/proc/mounts")
+        .map(|text| {
+            text.lines()
+                .any(|line| line.split_whitespace().nth(2) == Some("efivarfs"))
+        })
+        .unwrap_or(false)
+}
+
+/// Make efivarfs available for efibootmgr. The boot environment's dev init
+/// mounts proc/sys/dev but NOT efivarfs — without it efibootmgr fails with
+/// "EFI variables are not supported on this system", and neither the scan
+/// nor any firmware boot route works.
+pub fn ensure_efivars() -> Result<(), String> {
+    if efivars_mounted() {
+        return Ok(());
+    }
+    if !uefi_available() {
+        return Err("EFI variables are not supported on this system".to_string());
+    }
+    let dir = Path::new("/sys/firmware/efi/efivars");
+    let _ = fs::create_dir_all(dir);
+    let status = Command::new(mount_bin())
+        .args(["-t", "efivarfs", "efivarfs", "/sys/firmware/efi/efivars"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("could not mount efivarfs: {e}"))?;
+    if status.success() && efivars_mounted() {
+        Ok(())
+    } else {
+        Err("could not mount efivarfs (no EFI runtime variables?)".to_string())
+    }
 }
 
 /// Parse `efibootmgr` output. Entry lines look like:
@@ -1078,6 +1148,7 @@ fn parse_efibootmgr(text: &str) -> Vec<FirmwareEntry> {
             file: path
                 .and_then(|p| device_path_file(&p))
                 .map(|p| normalize_loader(&p)),
+            path: path.map(|p| p.to_string()),
         });
     }
 
@@ -1739,6 +1810,7 @@ mod tests {
             entries[0].file.as_deref(),
             Some("/efi/microsoft/boot/bootmgfw.efi")
         );
+        assert!(entries[0].path.as_deref().unwrap_or("").contains("HD("));
         assert_eq!(entries[1].label, "Firmware UI");
         assert_eq!(entries[1].file, None);
         assert_eq!(entries[2].label, "Debian");
