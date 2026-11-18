@@ -156,15 +156,21 @@ struct DiskGroup {
 /// Start the background watcher. `tx` receives a new list whenever the set
 /// of bootable devices changes; the receiver is normally polled from a
 /// `glib::timeout_add_local` callback.
-pub fn spawn_watcher(tx: Sender<Vec<BootDevice>>) {
+pub fn spawn_watcher(tx: Sender<Vec<BootDevice>>, boot_dir: PathBuf) {
     let _ = thread::Builder::new()
         .name("splash-device-watch".to_string())
         .spawn(move || {
             let mut state = ScanState::default();
             let mut last: Option<Vec<BootDevice>> = None;
             loop {
-                let list = scan_with_cache(&mut state);
+                let list = scan_with_cache(&mut state, &boot_dir);
                 if last.as_ref() != Some(&list) {
+                    let summary = list
+                        .iter()
+                        .map(|d| format!("{}({})", d.title, d.detail))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eprintln!("[sbm-scan] update: {summary}");
                     if tx.send(list.clone()).is_err() {
                         break; // UI is gone (kexec / exit)
                     }
@@ -176,8 +182,8 @@ pub fn spawn_watcher(tx: Sender<Vec<BootDevice>>) {
 }
 
 /// One-shot scan (used by `--list-devices` and tests).
-pub fn scan() -> Vec<BootDevice> {
-    scan_with_cache(&mut ScanState::default())
+pub fn scan(boot_dir: &Path) -> Vec<BootDevice> {
+    scan_with_cache(&mut ScanState::default(), boot_dir)
 }
 
 #[derive(Default)]
@@ -187,6 +193,11 @@ struct ScanState {
     /// Firmware boot entries, refreshed every `FW_REFRESH` (they rarely
     /// change while the menu is open, and efivar reads are not free).
     fw: Option<FwCache>,
+    /// Scans completed: the first one traces every candidate.
+    scans: u32,
+    /// Trace diagnostics for this scan (first scan always; every scan with
+    /// SPLASH_SCAN_DEBUG=1).
+    trace: bool,
 }
 
 struct FwCache {
@@ -201,22 +212,141 @@ struct CacheEntry {
     fingerprint: String,
     device: Option<BootDevice>,
     last_try: Instant,
+    /// Set when the probe failed at the mount step (slow, noisy — e.g. an
+    /// ext4 journal replay or a stuck optical drive): retried far less
+    /// often than a successful mount with no boot config.
+    mount_failed: bool,
 }
 
-fn scan_with_cache(state: &mut ScanState) -> Vec<BootDevice> {
+fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
     let now = Instant::now();
+    state.trace = std::env::var("SPLASH_SCAN_DEBUG").as_deref() == Ok("1") || state.scans == 0;
     let busy = busy_devnums();
     let swaps = swap_devnodes();
     let fw = fw_entries_cached(state, now);
-    // Loaders already covered by a firmware entry: the ESP scan must not
-    // show "Windows Boot Manager" twice (once as Boot0003, once as a
-    // scanned partition).
+    // Loaders already covered by a firmware entry: an internal ESP with
+    // bootmgfw.efi must not show twice (once as Boot0003, once as a scanned
+    // partition). Removable media are exempt: a firmware entry named
+    // "UEFI: SanDisk" pointing at \EFI\BOOT\BOOTX64.EFI is *not* proof that
+    // it targets our stick, and swallowing the stick this way once made the
+    // CD/USB discs vanish.
     let fw_files: HashSet<String> = fw.iter().filter_map(|e| e.file.clone()).collect();
+
+    // Titles already shown by the picker's internal BLS entries: firmware
+    // entries that boot the same OS ("Debian" vs "Debian GNU/Linux 12",
+    // "SplashOS" vs "SplashOS 0.0.1-dev") are duplicates and stay hidden.
+    let internal_titles: Vec<String> = bls::scan_entries(boot_dir)
+        .iter()
+        .map(|e| e.title.clone())
+        .collect();
 
     let mut found: Vec<BootDevice> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut scanned_models: Vec<String> = Vec::new();
+    let mut scanned_internal_titles: Vec<String> = Vec::new();
 
+    // Removable media first: their probe is cheap and must never be delayed
+    // by slow internal-disk probes (spinning ext4, big partition tables).
+    let mut cands = candidates();
+    cands.sort_by_key(|c| probe_rank(c.kind));
+    for cand in cands {
+        if busy.contains(&cand.devnum) || swaps.contains(&cand.devnode) {
+            trace_candidate(state, &cand, "busy/mounted", None);
+            continue;
+        }
+
+        let info = blkid(&cand.devnode);
+        if info.fstype.is_empty() {
+            // Transient failure (drive spinning up, media busy): keep the
+            // previously confirmed device instead of flickering it away.
+            if let Some(c) = state.media.get(&cand.devnode) {
+                if let Some(d) = &c.device {
+                    trace_candidate(state, &cand, "blkid failed, keeping cached", Some(d));
+                    if seen.insert(d.key.clone()) {
+                        found.push(d.clone());
+                    }
+                }
+            } else {
+                trace_candidate(state, &cand, "no filesystem", None);
+            }
+            continue;
+        }
+        // The kernel only carries a few filesystem drivers: anything else
+        // (ntfs, xfs, btrfs, luks, swap, ...) cannot be inspected or booted.
+        // Optical discs are exempt — they fall back to the firmware route.
+        if !MOUNTABLE_FS.contains(&info.fstype.as_str()) && cand.kind != DeviceKind::Optical {
+            trace_candidate(
+                state,
+                &cand,
+                &format!("fs {} not supported by kernel", info.fstype),
+                None,
+            );
+            continue;
+        }
+        let fp = info.fingerprint(cand.size);
+
+        let device = match state.media.get(&cand.devnode) {
+            Some(c) if c.fingerprint == fp && c.device.is_some() => Some(c.device.clone().unwrap()),
+            Some(c)
+                if c.fingerprint == fp
+                    && c.device.is_none()
+                    && now.duration_since(c.last_try) < retry_interval(c.mount_failed) =>
+            {
+                None
+            }
+            _ => probe_cached(state, &cand, &info, &fp, now),
+        };
+
+        if let Some(device) = device {
+            // An installed ESP loader already owned by a firmware entry
+            // would show twice (e.g. Boot0003 and the same bootmgfw.efi on
+            // disk) — the firmware entry wins.
+            if device.kind == DeviceKind::Internal {
+                if let BootKind::Efi { loader, .. } = &device.boot {
+                    if let Some(file) = fw_entries_file(loader) {
+                        if fw_files.contains(&file) {
+                            trace_candidate(state, &cand, "covered by a firmware entry", None);
+                            continue;
+                        }
+                    }
+                }
+            }
+            if device.kind == DeviceKind::Usb || device.kind == DeviceKind::Optical {
+                // For duplicate detection against firmware entries: a
+                // "UEFI: SanDisk ..." entry is the same drive as our media
+                // row when its label names the drive model.
+                if !cand.model.is_empty() {
+                    scanned_models.push(cand.model.to_lowercase());
+                }
+            }
+            if device.kind == DeviceKind::Internal {
+                scanned_internal_titles.push(device.title.clone());
+            }
+            trace_candidate(state, &cand, "bootable", Some(&device));
+            if seen.insert(device.key.clone()) {
+                found.push(device);
+            }
+        } else {
+            trace_candidate(state, &cand, "no boot configuration", None);
+        }
+    }
+
+    // Firmware entries last, filtered against everything already shown:
+    // internal BLS entries, scanned internal OS rows, and removable media.
+    let mut duplicate_titles = internal_titles;
+    duplicate_titles.extend(scanned_internal_titles);
     for entry in fw {
+        if titles_match(&entry.label, &duplicate_titles) {
+            trace_fw(state, &entry, "duplicates an internal entry");
+            continue;
+        }
+        if scanned_models
+            .iter()
+            .any(|model| entry.label.to_lowercase().contains(model))
+        {
+            trace_fw(state, &entry, "duplicates a removable media row");
+            continue;
+        }
         let device = BootDevice {
             key: format!("fw|{}", entry.number),
             devnode: String::new(),
@@ -234,44 +364,103 @@ fn scan_with_cache(state: &mut ScanState) -> Vec<BootDevice> {
         }
     }
 
-    for cand in candidates() {
-        if busy.contains(&cand.devnum) || swaps.contains(&cand.devnode) {
-            continue;
-        }
-
-        let info = blkid(&cand.devnode);
-        if info.fstype.is_empty() {
-            continue;
-        }
-        let fp = info.fingerprint(cand.size);
-
-        let device = match state.media.get(&cand.devnode) {
-            Some(c) if c.fingerprint == fp => match &c.device {
-                Some(d) => Some(d.clone()),
-                None if now.duration_since(c.last_try) < NEGATIVE_RETRY => None,
-                None => probe_cached(state, &cand, &info, &fp, now),
-            },
-            _ => probe_cached(state, &cand, &info, &fp, now),
-        };
-
-        if let Some(device) = device {
-            // An ESP loader already owned by a firmware entry would show
-            // twice (e.g. Boot0003 and the same bootmgfw.efi on disk).
-            if let BootKind::Efi { loader, .. } = &device.boot {
-                if let Some(file) = fw_entries_file(loader) {
-                    if fw_files.contains(&file) {
-                        continue;
-                    }
-                }
-            }
-            if seen.insert(device.key.clone()) {
-                found.push(device);
-            }
-        }
-    }
-
     found.sort_by(|a, b| (a.kind, a.title.to_lowercase()).cmp(&(b.kind, b.title.to_lowercase())));
+    state.scans += 1;
     found
+}
+
+/// Probe processing order: optical and USB first, internal disks last —
+/// the reverse would delay the media rows behind slow internal probes.
+fn probe_rank(kind: DeviceKind) -> u8 {
+    match kind {
+        DeviceKind::Usb => 0,
+        DeviceKind::Optical => 1,
+        DeviceKind::Internal => 2,
+    }
+}
+
+/// Filesystems this kernel can actually mount (drivers built in, not
+/// modular): ext2/3/4 via EXT4, FAT via VFAT/MSDOS, ISO9660.
+const MOUNTABLE_FS: [&str; 6] = ["ext2", "ext3", "ext4", "vfat", "msdos", "iso9660"];
+
+fn retry_interval(mount_failed: bool) -> Duration {
+    if mount_failed {
+        MOUNT_FAIL_RETRY
+    } else {
+        NEGATIVE_RETRY
+    }
+}
+
+/// A failed mount is retried this often (60 s) instead of the 10 s
+/// "mounted but nothing bootable" retry.
+const MOUNT_FAIL_RETRY: Duration = Duration::from_secs(60);
+
+/// Two titles describe the same OS when one, normalized, is a leading
+/// word-boundary prefix of the other: "Debian" duplicates
+/// "Debian GNU/Linux 12", "SplashOS" duplicates "SplashOS 0.0.1-dev".
+fn titles_match(label: &str, internal_titles: &[String]) -> bool {
+    let label = normalize_title(label);
+    !label.is_empty()
+        && internal_titles.iter().any(|title| {
+            let title = normalize_title(title);
+            let (short, long) = if title.len() < label.len() {
+                (&title, &label)
+            } else {
+                (&label, &title)
+            };
+            *long == *short
+                || (long.starts_with(short.as_str())
+                    && long[short.len()..].starts_with([' ', '/', '-', ':']))
+        })
+}
+
+/// Lowercase, drop parenthesized qualifiers ("(Kokomi)"), punctuation and
+/// duplicate whitespace.
+fn normalize_title(title: &str) -> String {
+    let cut = title.split('(').next().unwrap_or(title);
+    let cleaned: String = cut
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '/' || c == '.' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Diagnostics for the boot screen: land in the app's stderr
+/// (/run/gbm.err). The first scan traces every candidate and outcome so a
+/// missing CD/USB shows exactly why; later scans only trace changes.
+fn trace_candidate(
+    state: &ScanState,
+    cand: &Candidate,
+    verdict: &str,
+    device: Option<&BootDevice>,
+) {
+    if !state.trace {
+        return;
+    }
+    let detail = device
+        .map(|d| format!(" \"{}\" [{}]", d.title, d.detail))
+        .unwrap_or_default();
+    eprintln!("[sbm-scan] {} -> {}{}", cand.devnode, verdict, detail);
+}
+
+fn trace_fw(state: &ScanState, entry: &FirmwareEntry, verdict: &str) {
+    if !state.trace {
+        return;
+    }
+    eprintln!(
+        "[sbm-scan] Boot{} \"{}\" -> {}",
+        entry.number, entry.label, verdict
+    );
 }
 
 fn fw_entries_cached(state: &mut ScanState, now: Instant) -> Vec<FirmwareEntry> {
@@ -298,49 +487,109 @@ fn probe_cached(
     fingerprint: &str,
     now: Instant,
 ) -> Option<BootDevice> {
-    let device = probe(cand, info);
+    let (device, mount_failed) = match probe(cand, info) {
+        Ok(device) => (Some(device), false),
+        Err(ProbeFail::Mount) => (None, true),
+        Err(ProbeFail::NoBoot) => (None, false),
+    };
     state.media.insert(
         cand.devnode.clone(),
         CacheEntry {
             fingerprint: fingerprint.to_string(),
             device: device.clone(),
             last_try: now,
+            mount_failed,
         },
     );
     device
 }
 
-fn probe(cand: &Candidate, info: &BlkInfo) -> Option<BootDevice> {
-    // EXFAT/NTFS/UDF are not in this kernel (the media builders use
-    // FAT32/iso9660 for bootable images), so an unmountable filesystem is
-    // not a boot candidate here.
-    let mount = mount_media(&cand.devnode, &info.fstype).ok()?;
-    let (boot, preferred_title) = probe_boot_tree(
-        mount.path(),
-        &info.fstype,
-        cand.kind,
-        cand.partition,
-        &cand.model,
-    )?;
-    drop(mount);
+/// Why a candidate yielded no device.
+enum ProbeFail {
+    /// The filesystem could not be mounted (slow/noisy — retried rarely).
+    Mount,
+    /// Mounted fine, but there is nothing bootable on it.
+    NoBoot,
+}
 
-    let title = if let Some(title) = preferred_title {
-        // ESP loaders carry their own identity ("Windows Boot Manager",
-        // "Ubuntu") which beats the useless ESP volume label.
-        title
-    } else if !info.label.trim().is_empty() {
-        info.label.trim().to_string()
-    } else if !cand.model.trim().is_empty() {
-        cand.model.trim().to_string()
-    } else {
-        match cand.kind {
-            DeviceKind::Internal => "UEFI boot".to_string(),
-            DeviceKind::Optical => "CD-ROM".to_string(),
-            DeviceKind::Usb => "USB drive".to_string(),
+fn probe(cand: &Candidate, info: &BlkInfo) -> Result<BootDevice, ProbeFail> {
+    // Try the detected filesystem first. Optical discs get iso9660/vfat
+    // fallbacks: bridge images (UDF/ISO9660 hybrids like Windows install
+    // media) are reported as udf by blkid, and this kernel cannot mount
+    // udf — but the iso9660 half often mounts.
+    let mut attempts: Vec<String> = Vec::new();
+    if MOUNTABLE_FS.contains(&info.fstype.as_str()) {
+        attempts.push(info.fstype.clone());
+    }
+    if cand.kind == DeviceKind::Optical {
+        for fs in ["iso9660", "vfat"] {
+            if !attempts.iter().any(|a| a == fs) {
+                attempts.push(fs.to_string());
+            }
         }
+    }
+
+    let mut mounted: Option<(Mount, String)> = None;
+    for fs in &attempts {
+        match mount_media(&cand.devnode, fs) {
+            Ok(m) => {
+                mounted = Some((m, fs.clone()));
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let Some((mount, fs)) = mounted else {
+        if cand.kind == DeviceKind::Optical && !info.fstype.is_empty() {
+            // A disc is in the drive but this kernel cannot read its
+            // filesystem. Offer it anyway via the firmware route — the
+            // firmware is not bound to this kernel's drivers.
+            return Ok(firmware_disc(cand, info));
+        }
+        return Err(ProbeFail::Mount);
     };
 
-    Some(BootDevice {
+    let (boot, preferred_title) =
+        match probe_boot_tree(mount.path(), &fs, cand.kind, cand.partition, &cand.model) {
+            Some(found) => found,
+            None if cand.kind == DeviceKind::Optical => {
+                // Mounted, but nothing bootable in the parts this kernel can
+                // read (bridge images show an empty iso9660 view). The firmware
+                // can still boot such a disc — offer it.
+                drop(mount);
+                return Ok(firmware_disc(cand, info));
+            }
+            None => return Err(ProbeFail::NoBoot),
+        };
+    drop(mount);
+
+    let title = preferred_title
+        .or_else(|| match &boot {
+            // An internal Linux root's own entry title ("Debian GNU/Linux")
+            // is a better caption than its volume label.
+            BootKind::Kexec { entries, .. }
+                if cand.kind == DeviceKind::Internal && !entries.is_empty() =>
+            {
+                Some(entries[0].title.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            if !info.label.trim().is_empty() {
+                info.label.trim().to_string()
+            } else if !cand.model.trim().is_empty() {
+                cand.model.trim().to_string()
+            } else {
+                match cand.kind {
+                    DeviceKind::Internal => "UEFI boot".to_string(),
+                    DeviceKind::Optical => "CD-ROM".to_string(),
+                    DeviceKind::Usb => "USB drive".to_string(),
+                }
+            }
+        });
+
+    Ok(BootDevice {
         key: format!("{}|{}|{}", cand.devnode, cand.size, info.uuid),
         devnode: cand.devnode.clone(),
         disk: cand.disk.clone(),
@@ -350,6 +599,35 @@ fn probe(cand: &Candidate, info: &BlkInfo) -> Option<BootDevice> {
         detail: format!("{} · {}", cand.kind.label(), human_size(cand.size)),
         boot,
     })
+}
+
+/// A disc that is present but unreadable (or unreadable-as-bootable) by
+/// this kernel: show it with the firmware route — the firmware is not
+/// bound to the kernel's filesystem drivers.
+fn firmware_disc(cand: &Candidate, info: &BlkInfo) -> BootDevice {
+    let title = if !info.label.trim().is_empty() {
+        info.label.trim().to_string()
+    } else if !cand.model.trim().is_empty() {
+        cand.model.trim().to_string()
+    } else {
+        "CD-ROM".to_string()
+    };
+    BootDevice {
+        key: format!("{}|{}|{}", cand.devnode, cand.size, info.uuid),
+        devnode: cand.devnode.clone(),
+        disk: cand.disk.clone(),
+        uuid: info.uuid.clone(),
+        kind: DeviceKind::Optical,
+        title,
+        detail: format!(
+            "{} · {}",
+            DeviceKind::Optical.label(),
+            human_size(cand.size)
+        ),
+        boot: BootKind::Firmware {
+            model: cand.model.clone(),
+        },
+    }
 }
 
 /// Look for a boot configuration on a mounted filesystem. Returns the boot
@@ -1415,6 +1693,26 @@ mod tests {
         assert_eq!(sys.options, "boot=live components quiet");
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn titles_match_detects_duplicates() {
+        let internal = vec![
+            "SplashOS 0.0.1-dev (Kokomi)".to_string(),
+            "Debian GNU/Linux (13.7)".to_string(),
+        ];
+        // Firmware entries that boot the same OSes as the internal entries.
+        assert!(titles_match("Debian", &internal));
+        assert!(titles_match("Debian GNU/Linux", &internal));
+        assert!(titles_match("splashos", &internal));
+        assert!(titles_match("SplashOS 0.0.1", &internal));
+        // Different OSes must stay visible.
+        assert!(!titles_match("Windows Boot Manager", &internal));
+        assert!(!titles_match("UEFI: QEMU DVD-ROM", &internal));
+        assert!(!titles_match("Windows 11 installer", &internal));
+        // Degenerate inputs.
+        assert!(!titles_match("", &internal));
+        assert!(!titles_match("   ", &internal));
     }
 
     #[test]

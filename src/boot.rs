@@ -266,15 +266,40 @@ fn firmware_boot(model: &str, dry_run: bool) -> Result<(), String> {
 
     ensure_efivars()?;
     let entries = devices::firmware_entries()?;
-    let (number, label) = entries
-        .iter()
-        .find(|e| e.label.to_lowercase().contains(&needle))
-        .map(|e| (e.number.clone(), e.label.clone()))
+    let (number, label) = firmware_entry_matching(&entries, &needle)
         .ok_or_else(|| format!("the firmware has no boot option for “{model}”"))?;
 
     println!("firmware boot: {label}");
     set_boot_next(&efibootmgr, &number)?;
     reboot_now()
+}
+
+/// Pick the firmware entry that belongs to a drive: score every entry by
+/// how many of the drive model's words its label contains ("QEMU QEMU
+/// DVD-ROM" → "UEFI QEMU DVD-ROM" scores higher than "UEFI QEMU Hard
+/// Disk"), preferring entries earlier in the boot order on ties.
+fn firmware_entry_matching(
+    entries: &[devices::FirmwareEntry],
+    model: &str,
+) -> Option<(String, String)> {
+    let tokens: Vec<&str> = model
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|t| t.len() >= 3)
+        .collect();
+
+    let mut best: Option<(&devices::FirmwareEntry, usize)> = None;
+    for entry in entries {
+        let label = entry.label.to_lowercase();
+        let score = tokens.iter().filter(|t| label.contains(*t)).count();
+        if score == 0 {
+            continue;
+        }
+        if best.map(|(_, s)| score > s).unwrap_or(true) {
+            best = Some((entry, score));
+        }
+    }
+    best.map(|(entry, _)| (entry.number.clone(), entry.label.clone()))
 }
 
 fn ensure_efivars() -> Result<(), String> {

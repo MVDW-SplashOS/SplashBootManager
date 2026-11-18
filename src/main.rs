@@ -41,6 +41,9 @@ const DISC_SIZE: i32 = 112;
 /// Everything the UI needs, shared across callbacks.
 struct Manager {
     dry_run: bool,
+    /// $BOOT tree the internal entries come from (also used by the hotplug
+    /// watcher's duplicate detector).
+    boot_dir: PathBuf,
     entries: Vec<bls::BootEntry>,
     /// Bootable removable media, refreshed by the hotplug watcher.
     devices: Vec<devices::BootDevice>,
@@ -78,7 +81,7 @@ fn main() -> glib::ExitCode {
     // Diagnostics helper (no GTK/display needed): show what the hotplug
     // scanner sees and how each device would boot.
     if list_devices {
-        for device in devices::scan() {
+        for device in devices::scan(&boot_dir) {
             println!(
                 "{}  {:?}  \"{}\"  {}",
                 device.devnode, device.kind, device.title, device.detail
@@ -116,6 +119,7 @@ fn main() -> glib::ExitCode {
     let entries = bls::scan_entries(&boot_dir);
     let manager = Rc::new(RefCell::new(Manager {
         dry_run,
+        boot_dir: boot_dir.clone(),
         entries,
         devices: Vec::new(),
     }));
@@ -294,7 +298,7 @@ fn build_menu_page(
     // timeout only drains results and rebuilds the row when something
     // changed. Focus is preserved by disc key across rebuilds.
     let (tx, rx) = std::sync::mpsc::channel();
-    devices::spawn_watcher(tx);
+    devices::spawn_watcher(tx, manager.borrow().boot_dir.clone());
     {
         let manager = manager.clone();
         let discs = discs.clone();

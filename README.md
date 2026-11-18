@@ -35,6 +35,13 @@ Selecting one sets `efibootmgr --bootnext <entry>` and warm-reboots the
 machine into it; a missing entry is created on the fly (labeled
 `SplashOS <name> [<fs-uuid>]` so a different stick never reuses it).
 
+Duplicate detection: a firmware entry is hidden when it boots the same OS
+as something already shown — its title matches an internal BLS/scan title
+("Debian" vs "Debian GNU/Linux 12", "SplashOS" vs "SplashOS 0.0.1-dev"), or
+its label names a drive already offered as a media row ("UEFI: SanDisk
+Extreme" vs the USB row for that stick), or an internal ESP scan already
+found its loader. What stays visible is one disc per bootable OS.
+
 BIOS systems have no firmware interface, so the UEFI discs are not offered
 there (and `Boot failed: UEFI firmware boot is unavailable...` is what a
 BIOS boot of such a target reports). Internal Linux roots (BLS/GRUB trees)
@@ -60,6 +67,12 @@ How a device is booted depends on what is on it:
   into it; optical media use the firmware's existing boot option for the
   drive
 - anything else (exFAT/NTFS/UDF-only data media) is not bootable and is not
+  shown — except optical discs: a present but unreadable disc (UDF bridge
+  images like Windows install media, which this kernel cannot mount) is
+  still shown with the firmware route, because the firmware is not bound to
+  the kernel's filesystem drivers. The first scan also traces every
+  candidate and its verdict to stderr (`/run/gbm.err`), which makes a
+  missing device diagnosable.
   shown
 
 `--list-devices` prints the scanner's result (device, route, parsed boot
