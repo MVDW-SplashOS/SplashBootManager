@@ -132,6 +132,20 @@ pub struct BootDevice {
     pub boot: BootKind,
 }
 
+impl BootDevice {
+    /// Label of the one-shot firmware entry this app creates for removable
+    /// media. The UUID keeps discs apart and lets a later attempt find the
+    /// entry again (and keeps it out of the picker — the media row is the
+    /// user-facing choice).
+    pub fn firmware_label(&self) -> String {
+        if self.uuid.is_empty() {
+            format!("SplashOS {}", self.title)
+        } else {
+            format!("SplashOS {} [{}]", self.title, self.uuid)
+        }
+    }
+}
+
 struct BlkInfo {
     fstype: String,
     label: String,
@@ -251,6 +265,10 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
     let mut found: Vec<BootDevice> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut scanned_models: Vec<String> = Vec::new();
+    // Labels of the one-shot entries this app creates for removable media:
+    // an entry carrying one of these is the media row's own firmware
+    // counterpart and must not be listed a second time.
+    let mut scanned_media_labels: Vec<String> = Vec::new();
     let mut scanned_internal_titles: Vec<String> = Vec::new();
 
     // Removable media first: their probe is cheap and must never be delayed
@@ -326,6 +344,7 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
                 if !cand.model.is_empty() {
                     scanned_models.push(cand.model.to_lowercase());
                 }
+                scanned_media_labels.push(device.firmware_label());
             }
             if device.kind == DeviceKind::Internal {
                 scanned_internal_titles.push(device.title.clone());
@@ -364,6 +383,13 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
     for entry in fw {
         if titles_match(&entry.label, &duplicate_titles) {
             trace_fw(state, &entry, "duplicates an internal entry");
+            continue;
+        }
+        if scanned_media_labels
+            .iter()
+            .any(|label| *label == entry.label)
+        {
+            trace_fw(state, &entry, "duplicates a scanned media row");
             continue;
         }
         if scanned_models

@@ -62,17 +62,23 @@ How a device is booted depends on what is on it:
   kernel/initrd are loaded, the media is unmounted, then `kexec -e`)
 - a GRUB or isolinux/syslinux config — the first/default menu entry is
   kexec'ed the same way (live Linux discs/installers)
-- optical media — the firmware route in three tiers: an existing firmware
-  entry naming the drive, then an entry whose device path is a CD/DVD, and
-  finally a one-shot entry created for the drive pointing at the disc's
-  EFI loader (`\EFI\BOOT\BOOTX64.EFI` for Windows install media — the
-  firmware reads the UDF filesystem even when this kernel cannot). The
-  firmware's own boot order is restored after such a creation so every
-  future boot still prefers the installed OS
+- optical media — the firmware route: an existing firmware entry for the
+  drive (matched by label or by a CD/DVD device path), else the one-shot
+  entry this app created earlier, else a new one-shot entry. Created entries
+  are rewritten to their **short form** (device path without a file node):
+  efibootmgr's file path has no filesystem node in front of it on a CD, so
+  the firmware cannot resolve it and silently skips the option. Short form
+  makes the firmware search `\EFI\BOOT\BOOTX64.EFI` on every filesystem of
+  the drive, which finds the El Torito boot image — the one Windows install
+  media actually boots from (the UDF view is readable by firmware for
+  listing, but its loaders are not executable). The firmware's own boot
+  order is restored after creation so future boots still prefer the
+  installed OS. Windows install media then shows its own "Press any key to
+  boot from CD or DVD" prompt; ignore it and the firmware falls through to
+  the next boot option
 - only `EFI/BOOT/BOOT*.EFI` (Windows/Ubuntu installers) — a one-shot firmware
   boot entry is created (`efibootmgr --bootnext`) and the machine reboots
-  into it; optical media use the firmware's existing boot option for the
-  drive
+  into it
 - anything else (exFAT/NTFS/UDF-only data media) is not bootable and is not
   shown — except optical discs: a present but unreadable disc (UDF bridge
   images like Windows install media, which this kernel cannot mount) is

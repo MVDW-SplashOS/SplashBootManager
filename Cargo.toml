@@ -1,6 +1,6 @@
 [package]
 name = "splash-boot-manager"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "SplashOS LinuxBoot-style graphical boot manager"
 license = "GPL-2.0-or-later"
