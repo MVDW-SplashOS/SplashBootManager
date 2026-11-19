@@ -33,9 +33,19 @@ the firmware. On UEFI systems the picker also lists:
 
 Firmware *tools* are not boot volumes and are not shown as discs: the
 firmware boot-manager UI, firmware setup and the UEFI shell live in the
-header-bar menu instead. Selecting one still goes through the firmware
+header-bar menu instead, under friendly names (`BootManagerMenuApp` →
+"UEFI Boot Menu"). Selecting one still goes through the firmware
 (`efibootmgr --bootnext` + reboot). The same menu holds **About SplashOS
-Boot Manager** (libadwaita about dialog with the running version).
+Boot Manager** (libadwaita about dialog with the running version; no
+"Report an issue" button — the boot environment has no network).
+
+Entries the firmware generated itself (efibootmgr marks them
+`{auto_created_boot_option}`) are hidden too: they point at a bare disk,
+DVD drive or network device and only duplicate the media/OS row.
+
+Installed-OS icons use Adwaita's `drive-harddisk-symbolic` artwork and
+optical media `media-optical-symbolic`; the image carries no SVG loader, so
+their path data is rendered directly with Cairo.
 
 Selecting one sets `efibootmgr --bootnext <entry>` and warm-reboots the
 machine into it; a missing entry is created on the fly (labeled

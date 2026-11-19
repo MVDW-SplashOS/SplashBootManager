@@ -391,10 +391,13 @@ fn build_app_menu(
         let section = gtk::gio::Menu::new();
         for (index, entry) in utilities.iter().enumerate() {
             let action_name = format!("firmware-{index}");
-            section.append(Some(&entry.label), Some(&format!("app-menu.{action_name}")));
+            section.append(
+                Some(entry.menu_title()),
+                Some(&format!("app-menu.{action_name}")),
+            );
             let action = gtk::gio::SimpleAction::new(&action_name, None);
             let number = entry.number.clone();
-            let label = entry.label.clone();
+            let label = entry.menu_title().to_string();
             let status = status.clone();
             action.connect_activate(move |_, _| {
                 status.set_text(&format!("Restarting into \u{201c}{label}\u{201d}\u{2026}"));
@@ -426,7 +429,6 @@ fn build_app_menu(
                  or hands foreign media to the firmware.",
             )
             .website("https://github.com/MVDW-SplashOS/SplashBootManager")
-            .issue_url("https://github.com/MVDW-SplashOS/SplashBootManager/issues")
             .license_type(gtk::License::Gpl20)
             .developers(["SplashOS contributors"])
             .build();
@@ -534,7 +536,9 @@ fn disc_button(title: &str, detail: Option<&str>, icon: DiscIcon) -> gtk::Button
         .height_request(DISC_SIZE)
         .build();
     disc.set_draw_func(move |_area, cr, width, height| match icon {
-        DiscIcon::Optical => draw_disc(cr, width as f64, height as f64),
+        DiscIcon::Optical => {
+            draw_symbolic_icon(cr, width as f64, height as f64, OPTICAL_ICON, 0.84)
+        }
         DiscIcon::Usb => draw_usb(cr, width as f64, height as f64),
         DiscIcon::Windows => draw_windows(cr, width as f64, height as f64),
         DiscIcon::Hdd => draw_hdd(cr, width as f64, height as f64),
@@ -559,46 +563,241 @@ fn disc_button(title: &str, detail: Option<&str>, icon: DiscIcon) -> gtk::Button
     button
 }
 
-/// Draw a CD/disc icon with Cairo: dark body, data rings, hub and a
-/// specular highlight — readable on a black background.
+/// Draw an Adwaita symbolic icon (a 16x16 viewBox path) centred in the
+/// widget. Adwaita's icon set is SVG-only and this image has no SVG loader
+/// (librsvg), so the path data of the two icons the picker needs is drawn
+/// directly with Cairo — same artwork, vector-crisp at any size.
 #[allow(unused_must_use)]
-fn draw_disc(cr: &gtk::cairo::Context, width: f64, height: f64) {
-    let size = width.min(height) * 0.86;
-    let r = size / 2.0;
-    let cx = width / 2.0;
-    let cy = height / 2.0;
-
-    // Body with a soft radial gradient (lighter rim than core).
-    let body = gtk::cairo::RadialGradient::new(cx, cy, r * 0.30, cx, cy, r);
-    body.add_color_stop_rgba(0.0, 0.16, 0.16, 0.17, 1.0);
-    body.add_color_stop_rgba(0.75, 0.22, 0.22, 0.24, 1.0);
-    body.add_color_stop_rgba(1.0, 0.34, 0.34, 0.36, 1.0);
-    cr.set_source(&body);
-    cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+fn draw_symbolic_icon(cr: &gtk::cairo::Context, width: f64, height: f64, path: &str, scale: f64) {
+    let side = width.min(height) * scale;
+    let unit = side / 16.0;
+    cr.save();
+    cr.translate((width - side) / 2.0, (height - side) / 2.0);
+    cr.scale(unit, unit);
+    cr.set_source_rgba(0.84, 0.85, 0.87, 1.0);
+    draw_svg_path(cr, path);
     cr.fill();
+    cr.restore();
+}
 
-    // Faint data rings.
-    for (ring, alpha) in [(0.52, 0.10), (0.64, 0.08), (0.76, 0.07)] {
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-        cr.set_line_width(1.4);
-        cr.arc(cx, cy, r * ring, 0.0, std::f64::consts::TAU);
-        cr.stroke();
+/// `media-optical-symbolic` from adwaita-icon-theme (CC-BY-SA 3.0 /
+/// LGPL-3.0), 16x16 viewBox.
+const OPTICAL_ICON: &str = "m 8 0 c -4.40625 0 -8 3.59375 -8 8 s 3.59375 8 8 8 s 8 -3.59375 8 -8 s -3.59375 -8 -8 -8 z m 0 2 c 3.3125 0 6 2.6875 6 6 s -2.6875 6 -6 6 s -6 -2.6875 -6 -6 s 2.6875 -6 6 -6 z m 0 3 c -1.65625 0 -3 1.34375 -3 3 s 1.34375 3 3 3 s 3 -1.34375 3 -3 s -1.34375 -3 -3 -3 z m 0 1 c 1.105469 0 2 0.894531 2 2 s -0.894531 2 -2 2 s -2 -0.894531 -2 -2 s 0.894531 -2 2 -2 z m 0 1 c -0.550781 0 -1 0.449219 -1 1 s 0.449219 1 1 1 s 1 -0.449219 1 -1 s -0.449219 -1 -1 -1 z m 0 0";
+
+/// `drive-harddisk-symbolic` from adwaita-icon-theme.
+const HDD_ICON: &str = "m 4 0 c -1.644531 0 -3 1.355469 -3 3 v 10 c 0 1.644531 1.355469 3 3 3 h 8 c 1.644531 0 3 -1.355469 3 -3 v -10 c 0 -1.644531 -1.355469 -3 -3 -3 z m 0 2 h 8 c 0.570312 0 1 0.429688 1 1 v 9 c 0 0.570312 -0.429688 1 -1 1 h -8 c -0.554688 0 -1 -0.445312 -1 -1 v -9 c 0 -0.554688 0.445312 -1 1 -1 z m 4 1 c -2.210938 0 -4 1.789062 -4 4 v 4 h 4 c 2.5 0 4 -1.789062 4 -4 s -1.789062 -4 -4 -4 z m 0 2 c 1.105469 0 2 0.894531 2 2 s -0.894531 2 -2 2 s -2 -0.894531 -2 -2 s 0.894531 -2 2 -2 z m 0 0";
+
+#[derive(Clone, Copy)]
+enum SvgToken {
+    Command(char),
+    Number(f64),
+}
+
+fn tokenize_svg_path(data: &str) -> Vec<SvgToken> {
+    let bytes = data.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() {
+            tokens.push(SvgToken::Command(c));
+            i += 1;
+            continue;
+        }
+        if c == ',' || c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        if bytes[i] == b'+' || bytes[i] == b'-' {
+            i += 1;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+            i += 1;
+            if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        tokens.push(SvgToken::Number(data[start..i].parse().unwrap_or(0.0)));
     }
+    tokens
+}
 
-    // Specular highlight arc (top-left).
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.30);
-    cr.set_line_width(r * 0.055);
-    cr.arc(cx, cy, r * 0.88, -2.4, -1.2);
-    cr.stroke();
+fn take_number(tokens: &[SvgToken], index: &mut usize) -> Option<f64> {
+    match tokens.get(*index) {
+        Some(SvgToken::Number(value)) => {
+            *index += 1;
+            Some(*value)
+        }
+        _ => None,
+    }
+}
 
-    // Hub: light ring around the dark center hole.
-    cr.set_source_rgba(0.72, 0.72, 0.74, 1.0);
-    cr.set_line_width(r * 0.045);
-    cr.arc(cx, cy, r * 0.30, 0.0, std::f64::consts::TAU);
-    cr.stroke();
-    cr.set_source_rgb(0.0, 0.0, 0.0);
-    cr.arc(cx, cy, r * 0.24, 0.0, std::f64::consts::TAU);
-    cr.fill();
+fn take_command(tokens: &[SvgToken], index: &mut usize) -> Option<char> {
+    match tokens.get(*index) {
+        Some(SvgToken::Command(command)) => {
+            *index += 1;
+            Some(*command)
+        }
+        _ => None,
+    }
+}
+
+/// Minimal SVG path renderer: the commands Adwaita's symbolic icons use
+/// (M/m, L/l, H/h, V/v, C/c, S/s, Z/z). SVG's default nonzero fill rule is
+/// Cairo's winding rule, so the icon's cut-outs come out correctly.
+#[allow(unused_must_use)]
+fn draw_svg_path(cr: &gtk::cairo::Context, data: &str) {
+    let tokens = tokenize_svg_path(data);
+    let mut index = 0;
+    let Some(first) = take_command(&tokens, &mut index) else {
+        return;
+    };
+    let mut command = first;
+    let (mut x, mut y) = (0.0, 0.0);
+    let (mut start_x, mut start_y) = (0.0, 0.0);
+    let (mut last_c2_x, mut last_c2_y) = (0.0, 0.0);
+    let mut previous = ' ';
+
+    loop {
+        match command {
+            'M' | 'm' => {
+                let mut first = true;
+                while let (Some(mut nx), Some(mut ny)) = (
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                ) {
+                    if command == 'm' {
+                        nx += x;
+                        ny += y;
+                    }
+                    if first {
+                        cr.move_to(nx, ny);
+                        start_x = nx;
+                        start_y = ny;
+                        first = false;
+                    } else {
+                        cr.line_to(nx, ny);
+                    }
+                    x = nx;
+                    y = ny;
+                }
+            }
+            'L' | 'l' => {
+                while let (Some(mut nx), Some(mut ny)) = (
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                ) {
+                    if command == 'l' {
+                        nx += x;
+                        ny += y;
+                    }
+                    cr.line_to(nx, ny);
+                    x = nx;
+                    y = ny;
+                }
+            }
+            'H' | 'h' => {
+                while let Some(mut nx) = take_number(&tokens, &mut index) {
+                    if command == 'h' {
+                        nx += x;
+                    }
+                    cr.line_to(nx, y);
+                    x = nx;
+                }
+            }
+            'V' | 'v' => {
+                while let Some(mut ny) = take_number(&tokens, &mut index) {
+                    if command == 'v' {
+                        ny += y;
+                    }
+                    cr.line_to(x, ny);
+                    y = ny;
+                }
+            }
+            'C' | 'c' => {
+                while let (
+                    Some(mut x1),
+                    Some(mut y1),
+                    Some(mut c2x),
+                    Some(mut c2y),
+                    Some(mut nx),
+                    Some(mut ny),
+                ) = (
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                ) {
+                    if command == 'c' {
+                        x1 += x;
+                        y1 += y;
+                        c2x += x;
+                        c2y += y;
+                        nx += x;
+                        ny += y;
+                    }
+                    cr.curve_to(x1, y1, c2x, c2y, nx, ny);
+                    x = nx;
+                    y = ny;
+                    last_c2_x = c2x;
+                    last_c2_y = c2y;
+                }
+            }
+            'S' | 's' => {
+                while let (Some(mut c2x), Some(mut c2y), Some(mut nx), Some(mut ny)) = (
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                    take_number(&tokens, &mut index),
+                ) {
+                    if command == 's' {
+                        c2x += x;
+                        c2y += y;
+                        nx += x;
+                        ny += y;
+                    }
+                    let (c1x, c1y) =
+                        if previous == 'C' || previous == 'c' || previous == 'S' || previous == 's'
+                        {
+                            (2.0 * x - last_c2_x, 2.0 * y - last_c2_y)
+                        } else {
+                            (x, y)
+                        };
+                    cr.curve_to(c1x, c1y, c2x, c2y, nx, ny);
+                    x = nx;
+                    y = ny;
+                    last_c2_x = c2x;
+                    last_c2_y = c2y;
+                }
+            }
+            'Z' | 'z' => {
+                cr.close_path();
+                x = start_x;
+                y = start_y;
+            }
+            _ => break,
+        }
+        previous = command;
+        match take_command(&tokens, &mut index) {
+            Some(next) => command = next,
+            None => break,
+        }
+    }
 }
 
 /// Draw a USB flash drive: metal connector with two contacts, dark body
@@ -754,117 +953,9 @@ fn draw_windows(cr: &gtk::cairo::Context, width: f64, height: f64) {
     }
 }
 
-/// Draw an internal hard drive: a rounded enclosure with a visible platter
-/// and actuator arm, plus a small activity LED.
-#[allow(unused_must_use)]
+/// Internal disk / installed OS: Adwaita's drive-harddisk-symbolic.
 fn draw_hdd(cr: &gtk::cairo::Context, width: f64, height: f64) {
-    let s = width.min(height) * 0.82;
-    let cx = width / 2.0;
-    let cy = height / 2.0;
-
-    let body_w = s * 0.78;
-    let body_h = s * 0.52;
-    let body_x = cx - body_w / 2.0;
-    let body_y = cy - body_h / 2.0;
-
-    // Enclosure.
-    let body = gtk::cairo::LinearGradient::new(body_x, body_y, body_x, body_y + body_h);
-    body.add_color_stop_rgb(0.0, 0.32, 0.32, 0.35);
-    body.add_color_stop_rgb(0.5, 0.20, 0.20, 0.23);
-    body.add_color_stop_rgb(1.0, 0.13, 0.13, 0.15);
-    cr.set_source(&body);
-    rounded_rect(cr, body_x, body_y, body_w, body_h, s * 0.06);
-    cr.fill_preserve();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.16);
-    cr.set_line_width(1.2);
-    cr.stroke();
-
-    // Platter recess and platter.
-    let platter_r = body_h * 0.30;
-    let platter_cx = body_x + body_w * 0.34;
-    let platter_cy = body_y + body_h * 0.52;
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-    cr.arc(
-        platter_cx,
-        platter_cy,
-        platter_r * 1.14,
-        0.0,
-        std::f64::consts::TAU,
-    );
-    cr.fill();
-
-    let platter = gtk::cairo::RadialGradient::new(
-        platter_cx,
-        platter_cy,
-        platter_r * 0.2,
-        platter_cx,
-        platter_cy,
-        platter_r,
-    );
-    platter.add_color_stop_rgb(0.0, 0.62, 0.64, 0.68);
-    platter.add_color_stop_rgb(0.85, 0.45, 0.47, 0.52);
-    platter.add_color_stop_rgb(1.0, 0.58, 0.60, 0.66);
-    cr.set_source(&platter);
-    cr.arc(
-        platter_cx,
-        platter_cy,
-        platter_r,
-        0.0,
-        std::f64::consts::TAU,
-    );
-    cr.fill();
-
-    // Data rings.
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
-    cr.set_line_width(0.8);
-    for ring in [0.45, 0.65, 0.82] {
-        cr.arc(
-            platter_cx,
-            platter_cy,
-            platter_r * ring,
-            0.0,
-            std::f64::consts::TAU,
-        );
-        cr.stroke();
-    }
-
-    // Actuator arm reaching from the corner onto the platter.
-    cr.set_source_rgba(0.75, 0.76, 0.80, 0.9);
-    cr.set_line_width(s * 0.022);
-    cr.move_to(body_x + body_w * 0.88, body_y + body_h * 0.14);
-    cr.line_to(platter_cx + platter_r * 0.55, platter_cy - platter_r * 0.55);
-    cr.stroke();
-    cr.set_source_rgba(0.85, 0.86, 0.90, 1.0);
-    cr.arc(
-        platter_cx + platter_r * 0.55,
-        platter_cy - platter_r * 0.55,
-        s * 0.020,
-        0.0,
-        std::f64::consts::TAU,
-    );
-    cr.fill();
-
-    // Spindle hub.
-    cr.set_source_rgba(0.30, 0.31, 0.34, 1.0);
-    cr.arc(
-        platter_cx,
-        platter_cy,
-        platter_r * 0.22,
-        0.0,
-        std::f64::consts::TAU,
-    );
-    cr.fill();
-
-    // Activity LED.
-    cr.set_source_rgba(0.55, 0.75, 0.95, 0.9);
-    cr.arc(
-        body_x + body_w * 0.88,
-        body_y + body_h * 0.82,
-        s * 0.016,
-        0.0,
-        std::f64::consts::TAU,
-    );
-    cr.fill();
+    draw_symbolic_icon(cr, width, height, HDD_ICON, 0.78);
 }
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -977,6 +1068,55 @@ impl DiscRow {
             .unwrap_or(inner.focused);
         if let Some(button) = inner.buttons.get(current) {
             button.emit_clicked();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{draw_svg_path, OPTICAL_ICON};
+
+    /// The Adwaita optical icon is concentric rings: the parser and Cairo's
+    /// nonzero fill must reproduce the same filled/transparent pattern as
+    /// the SVG (this is what the picker shows for a CD/DVD).
+    #[test]
+    fn renders_adwaita_optical_icon_rings() {
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 160, 160).unwrap();
+        let cr = gtk::cairo::Context::new(&surface).unwrap();
+        cr.scale(10.0, 10.0);
+        draw_svg_path(&cr, OPTICAL_ICON);
+        cr.fill().unwrap();
+        drop(cr);
+        surface.flush();
+
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let alpha = |x: usize, y: usize| data[y * stride + x * 4 + 3];
+
+        // (pixel, expected filled) — radii along the vertical centre line.
+        for (y, filled) in [
+            (80, true),  // r = 0.05: centre dot
+            (72, true),  // r = 0.75
+            (63, false), // r = 1.65: hole
+            (51, true),  // r = 2.85: middle ring
+            (40, false), // r = 3.95: gap
+            (23, false), // r = 5.65: gap
+            (9, true),   // r = 7.05: outer ring
+        ] {
+            if filled {
+                assert!(
+                    alpha(80, y) > 200,
+                    "pixel (80,{y}) should be part of the icon (alpha {})",
+                    alpha(80, y)
+                );
+            } else {
+                assert!(
+                    alpha(80, y) < 50,
+                    "pixel (80,{y}) should be transparent (alpha {})",
+                    alpha(80, y)
+                );
+            }
         }
     }
 }

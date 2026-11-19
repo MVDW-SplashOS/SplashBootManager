@@ -125,6 +125,28 @@ impl FirmwareEntry {
             .map(|path| path.contains("FvFile(") || path.contains("FvVol("))
             .unwrap_or(false)
     }
+
+    /// True for entries the firmware generated on its own: efibootmgr marks
+    /// them with `{auto_created_boot_option}`. They only point at the disk
+    /// (often without any file node), so they duplicate the media row or an
+    /// installed OS and are not a separate choice.
+    pub fn is_auto_created(&self) -> bool {
+        self.path
+            .as_deref()
+            .map(|path| path.contains("{auto_created_boot_option}"))
+            .unwrap_or(false)
+    }
+
+    /// Human title for the app menu. Firmware labels are internal names
+    /// ("BootManagerMenuApp"), not something to show to a user.
+    pub fn menu_title(&self) -> &str {
+        match self.label.as_str() {
+            "BootManagerMenuApp" => "UEFI Boot Menu",
+            "EFI Firmware Setup" => "Firmware Setup",
+            "EFI Internal Shell" => "UEFI Shell",
+            other => other,
+        }
+    }
 }
 
 /// A bootable device shown in the picker.
@@ -398,6 +420,12 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
             // Firmware setup, the boot-manager UI and the UEFI shell are
             // not boot volumes: the app menu offers them instead.
             trace_fw(state, &entry, "firmware utility (app menu)");
+            continue;
+        }
+        if entry.is_auto_created() {
+            // Firmware-generated entries (usually a bare disk path) only
+            // duplicate a media row or an installed OS.
+            trace_fw(state, &entry, "firmware auto-created entry");
             continue;
         }
         if titles_match(&entry.label, &duplicate_titles) {
