@@ -175,10 +175,22 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(500);
-    window.set_content(Some(&stack));
+
+    // libadwaita toolbar: a slim header bar carries the app menu (firmware
+    // tools and About). The splash phase hides it so the logo stands alone
+    // on black, then it slides in with the picker.
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    header.set_show_start_title_buttons(false);
+    header.set_show_end_title_buttons(false);
+    header.set_title_widget(Some(&gtk::Label::new(Some("SplashOS"))));
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&stack));
+    toolbar.set_reveal_top_bars(!with_splash);
+    window.set_content(Some(&toolbar));
 
     build_splash_page(&stack);
-    let discs_menu = build_menu_page(&window, &manager, &stack);
+    let discs_menu = build_menu_page(&window, &header, &manager, &stack);
 
     if with_splash {
         stack.set_visible_child_name("splash");
@@ -187,11 +199,13 @@ fn build_ui(app: &adw::Application, manager: Rc<RefCell<Manager>>, with_splash: 
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(SPLASH_SECONDS);
         let stack = stack.clone();
+        let toolbar = toolbar.clone();
         let discs_menu = discs_menu.clone();
         glib::timeout_add_local_once(
             std::time::Duration::from_millis((splash_secs * 1000.0) as u64),
             move || {
                 stack.set_visible_child_name("menu");
+                toolbar.set_reveal_top_bars(true);
                 discs_menu.first_focus();
             },
         );
@@ -250,6 +264,7 @@ fn build_splash_page(stack: &gtk::Stack) {
 /// management.
 fn build_menu_page(
     window: &adw::ApplicationWindow,
+    header: &adw::HeaderBar,
     manager: &Rc<RefCell<Manager>>,
     stack: &gtk::Stack,
 ) -> DiscRow {
@@ -270,6 +285,9 @@ fn build_menu_page(
     status.set_margin_top(12);
     status.set_wrap(true);
     status.set_max_width_chars(60);
+
+    let dry_run = manager.borrow().dry_run;
+    build_app_menu(window, header, dry_run, &status);
 
     let row_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -345,6 +363,88 @@ fn build_menu_page(
     stack.add_named(&page, Some("menu"));
 
     discs
+}
+
+/// The app menu behind the header-bar hamburger: firmware-provided tools
+/// and About.
+///
+/// Firmware setup, the firmware boot-menu UI and the UEFI shell point into
+/// firmware volumes — they act on the machine, they are not bootable
+/// volumes — so the picker hides them and they live here instead. Each one
+/// still runs through the firmware route (`efibootmgr --bootnext` + reboot).
+fn build_app_menu(
+    window: &adw::ApplicationWindow,
+    header: &adw::HeaderBar,
+    dry_run: bool,
+    status: &gtk::Label,
+) {
+    let menu = gtk::gio::Menu::new();
+    let actions = gtk::gio::SimpleActionGroup::new();
+
+    let utilities: Vec<devices::FirmwareEntry> = devices::firmware_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.is_firmware_utility())
+        .collect();
+
+    if !utilities.is_empty() {
+        let section = gtk::gio::Menu::new();
+        for (index, entry) in utilities.iter().enumerate() {
+            let action_name = format!("firmware-{index}");
+            section.append(Some(&entry.label), Some(&format!("app-menu.{action_name}")));
+            let action = gtk::gio::SimpleAction::new(&action_name, None);
+            let number = entry.number.clone();
+            let label = entry.label.clone();
+            let status = status.clone();
+            action.connect_activate(move |_, _| {
+                status.set_text(&format!("Restarting into \u{201c}{label}\u{201d}\u{2026}"));
+                if let Err(err) = boot::firmware_entry_boot(&number, dry_run) {
+                    status.set_text(&format!("Boot failed: {err}"));
+                }
+            });
+            actions.add_action(&action);
+        }
+        menu.append_section(None, &section);
+    }
+
+    let about_section = gtk::gio::Menu::new();
+    about_section.append(Some("About SplashOS Boot Manager"), Some("app-menu.about"));
+    menu.append_section(None, &about_section);
+
+    let about_action = gtk::gio::SimpleAction::new("about", None);
+    let window_weak = window.downgrade();
+    about_action.connect_activate(move |_, _| {
+        let Some(window) = window_weak.upgrade() else {
+            return;
+        };
+        let about = adw::AboutDialog::builder()
+            .application_name("SplashOS Boot Manager")
+            .developer_name("SplashOS")
+            .version(env!("CARGO_PKG_VERSION"))
+            .comments(
+                "A graphical boot manager: picks a kernel to kexec, \
+                 or hands foreign media to the firmware.",
+            )
+            .website("https://github.com/MVDW-SplashOS/SplashBootManager")
+            .issue_url("https://github.com/MVDW-SplashOS/SplashBootManager/issues")
+            .license_type(gtk::License::Gpl20)
+            .developers(["SplashOS contributors"])
+            .build();
+        about.present(Some(&window));
+    });
+    actions.add_action(&about_action);
+
+    window.insert_action_group("app-menu", Some(&actions));
+
+    // No icon theme is installed in the boot environment, so the button
+    // carries a glyph from the bundled font instead of an icon name.
+    let button = gtk::MenuButton::builder()
+        .label("\u{2261}")
+        .tooltip_text("Menu")
+        .css_classes(vec!["flat"])
+        .build();
+    button.set_menu_model(Some(&menu));
+    header.pack_end(&button);
 }
 
 /// Build the full disc row (internal BLS entries first, then detected

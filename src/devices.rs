@@ -114,6 +114,19 @@ pub struct FirmwareEntry {
     pub path: Option<String>,
 }
 
+impl FirmwareEntry {
+    /// True for firmware-provided tools rather than boot volumes: the
+    /// boot-manager UI, firmware setup and the UEFI shell point into
+    /// firmware volumes (`FvVol(...)/FvFile(...)`), not at media. They are
+    /// not bootable choices in the picker; the app menu offers them.
+    pub fn is_firmware_utility(&self) -> bool {
+        self.path
+            .as_deref()
+            .map(|path| path.contains("FvFile(") || path.contains("FvVol("))
+            .unwrap_or(false)
+    }
+}
+
 /// A bootable device shown in the picker.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BootDevice {
@@ -381,6 +394,12 @@ fn scan_with_cache(state: &mut ScanState, boot_dir: &Path) -> Vec<BootDevice> {
     let mut duplicate_titles = internal_titles;
     duplicate_titles.extend(scanned_internal_titles);
     for entry in fw {
+        if entry.is_firmware_utility() {
+            // Firmware setup, the boot-manager UI and the UEFI shell are
+            // not boot volumes: the app menu offers them instead.
+            trace_fw(state, &entry, "firmware utility (app menu)");
+            continue;
+        }
         if titles_match(&entry.label, &duplicate_titles) {
             trace_fw(state, &entry, "duplicates an internal entry");
             continue;

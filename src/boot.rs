@@ -208,7 +208,7 @@ fn efi_boot(device: &BootDevice, loader: &str, part: u32, dry_run: bool) -> Resu
 /// the firmware UI, ...): make it the next boot target and warm-reboot.
 /// This is the route for every installed non-Linux OS — kexec cannot load
 /// them, but the firmware can.
-fn firmware_entry_boot(number: &str, dry_run: bool) -> Result<(), String> {
+pub fn firmware_entry_boot(number: &str, dry_run: bool) -> Result<(), String> {
     if !Path::new("/sys/firmware/efi").exists() {
         return Err(
             "UEFI firmware boot is unavailable (this system booted in BIOS mode)".to_string(),

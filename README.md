@@ -25,11 +25,17 @@ kexec can only load Linux kernels — so every non-Linux target goes through
 the firmware. On UEFI systems the picker also lists:
 
 - the firmware's existing boot entries (`Boot####`): "Windows Boot Manager",
-  a distro's GRUB/shim, the firmware UI, ... — shown in the firmware's own
-  boot order with a `UEFI · Boot0003` caption
+  a distro's GRUB/shim, ... — shown in the firmware's own boot order with a
+  `UEFI · Boot0003` caption
 - installed ESP loaders on internal disks that no entry covers yet: Windows
   (`EFI/Microsoft/Boot/bootmgfw.efi`), distro shims/GRUBs (`EFI/ubuntu/...`),
   systemd-boot, rEFInd, Apple loaders — with their distro name
+
+Firmware *tools* are not boot volumes and are not shown as discs: the
+firmware boot-manager UI, firmware setup and the UEFI shell live in the
+header-bar menu instead. Selecting one still goes through the firmware
+(`efibootmgr --bootnext` + reboot). The same menu holds **About SplashOS
+Boot Manager** (libadwaita about dialog with the running version).
 
 Selecting one sets `efibootmgr --bootnext <entry>` and warm-reboots the
 machine into it; a missing entry is created on the fly (labeled
