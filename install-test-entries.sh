@@ -154,12 +154,37 @@ timeout 5
 default splashos-0.0.1*
 EOF
 
+# Kernel command line: take it from the image's own grub.cfg (everything after
+# the kernel path on the first `linux` line), so edition-specific options
+# such as the desktop's systemd.volatile=overlay are not lost. Without that
+# option the desktop boots with a fully read-only root (/etc and /var too):
+# GDM, logind and journald cannot write their state and no desktop appears.
+splash_options=$(awk '$1 == "linux" { $1 = ""; $2 = ""; sub(/^ +/, ""); print; exit }' \
+	"$splash_root/boot/grub/grub.cfg" 2>/dev/null || true)
+if [ -z "$splash_options" ]; then
+	splash_options="root=UUID=$splash_uuid ro"
+	echo "WARN: no linux line in $splash_root/boot/grub/grub.cfg, using: $splash_options"
+fi
+echo "SplashOS options: $splash_options"
+
 cat > "$boot_dir/loader/entries/splashos-0.0.1.conf" << EOF
 # SplashOS distro install (kexec target)
 title   SplashOS 0.0.1-dev (Kokomi)
 linux   /splashos/7.1.8/linux
 initrd  /splashos/7.1.8/initrd
-options root=UUID=$splash_uuid ro
+options $splash_options
+EOF
+
+# Debug variant: same root, but verbose systemd status on the console and a
+# root shell on tty9 (Ctrl+Alt+F9) so a failed graphical boot can be inspected
+# with journalctl/systemctl even when no persistent log partition exists.
+splash_debug_options="$(echo "$splash_options" | sed -E 's/(^| )quiet( |$)/ /g; s/(^| )vt.global_cursor_default=0( |$)/ /g; s/(^| )loglevel=3( |$)/ /g; s/(^| )splashos.bootlogo( |$)/ /g; s/  +/ /g; s/ $//') systemd.show_status=1 systemd.debug-shell=1 systemd.log_level=info"
+cat > "$boot_dir/loader/entries/splashos-debug-0.0.1.conf" << EOF
+# SplashOS distro install, debug boot (debug shell on tty9)
+title   SplashOS 0.0.1-dev (debug)
+linux   /splashos/7.1.8/linux
+initrd  /splashos/7.1.8/initrd
+options $splash_debug_options
 EOF
 
 cat > "$boot_dir/loader/entries/debian-13-trixie.conf" << EOF
